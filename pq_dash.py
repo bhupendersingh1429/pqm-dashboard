@@ -149,9 +149,9 @@ else:
 
 # ================= HEADER =================
 
-last_modified = datetime.fromtimestamp(
-    os.path.getmtime(file_path)
-).strftime("%d-%b-%Y %I:%M %p")
+from datetime import datetime, timedelta
+
+as_of_date = (datetime.today() - timedelta(days=1)).strftime("%d-%b-%Y")
 
 st.markdown("""
 <div class="main-title">
@@ -160,7 +160,7 @@ PQM PERFORMANCE DASHBOARD
 """, unsafe_allow_html=True)
 
 st.markdown(
-    f"<div style='text-align:right;color:#666;font-weight:600;margin-top:8px;'>Last Updated: {last_modified}</div>",
+    f"<div style='text-align:right;color:#666;font-weight:600;margin-top:8px;'>As of {as_of_date}</div>",
     unsafe_allow_html=True
 )
 
