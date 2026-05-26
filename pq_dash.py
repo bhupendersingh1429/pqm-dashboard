@@ -319,7 +319,7 @@ with k5:
 with k6:
     kpi_card("PQM FTNR %", f"{pqm_ftnr_percent:.2f}%", "#7030a0")
 with k7:
-    kpi_card("Disbursed Amt", f"₹ {total_disbursed_amount/10000000:.2f} Cr", "#ed7d31")
+    kpi_card("Pre-Approved Disbursed Amt", f"₹ {total_disbursed_amount/10000000:.2f} Cr", "#ed7d31")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
