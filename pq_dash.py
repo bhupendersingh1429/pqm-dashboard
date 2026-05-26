@@ -245,7 +245,7 @@ if ceo_mode:
     with k3:
         kpi_card("PQM FTNR %", f"{pqm_ftnr_percent:.2f}%", "#ff4d4d")
     with k4:
-        kpi_card("Pre-Approved Disbursed Amt", f"₹ {total_disbursed_amount/10000000:.2f} Cr", "#f5b041")
+        kpi_card("Pre-Approved DB Amt", f"₹ {total_disbursed_amount/10000000:.2f} Cr", "#f5b041")
     with k5:
         kpi_card("Branches", f"{total_branches:,.0f}", "#9b59b6")
 
