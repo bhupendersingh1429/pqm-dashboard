@@ -106,7 +106,7 @@ df = load_data()
 
 st.sidebar.title("📌 Filters")
 
-ceo_mode = st.sidebar.toggle("🏢 CEO Presentation Mode", value=False)
+
 
 zone_list = sorted(df["Zone"].dropna().unique())
 zone_filter = st.sidebar.multiselect("Zone", zone_list)
@@ -192,115 +192,6 @@ def kpi_card(title, value, color):
         <div class="kpi-value">{value}</div>
     </div>
     """, unsafe_allow_html=True)
-
-# ================= CEO MODE =================
-
-if ceo_mode:
-
-    st.markdown("""
-    <style>
-    [data-testid="stAppViewContainer"] {
-        background: linear-gradient(135deg,#06152e,#092f63,#0b5cad);
-    }
-    .main-title {
-        background: linear-gradient(90deg,#000428,#004e92);
-        color:white;
-        font-size:44px;
-        padding:32px;
-        border-radius:28px;
-        box-shadow:0 12px 35px rgba(0,0,0,0.35);
-        text-align:center;
-        font-weight:900;
-        letter-spacing:1px;
-    }
-    .kpi-card {
-        background: rgba(255,255,255,0.13);
-        backdrop-filter: blur(14px);
-        border:1px solid rgba(255,255,255,0.25);
-        color:white;
-        box-shadow:0 10px 35px rgba(0,0,0,0.35);
-    }
-    .kpi-title {
-        color:#dbeafe;
-        font-size:15px;
-    }
-    .kpi-value {
-        color:white;
-        font-size:30px;
-    }
-    h2, h3 {
-        color:white !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown("## 🏢 CEO Executive Snapshot")
-
-    k1, k2, k3, k4, k5 = st.columns(5)
-
-    with k1:
-        kpi_card("PQM GRT", f"{pqm_grt:,.0f}", "#00a6d6")
-    with k2:
-        kpi_card("PQM GRT %", f"{pqm_grt_percent:.0f}%", "#70ad47")
-    with k3:
-        kpi_card("PQM FTNR %", f"{pqm_ftnr_percent:.2f}%", "#ff4d4d")
-    with k4:
-        kpi_card("Pre-Approved DB Amt", f"₹ {total_disbursed_amount/10000000:.2f} Cr", "#f5b041")
-    with k5:
-        kpi_card("Branches", f"{total_branches:,.0f}", "#9b59b6")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    risk_df = filtered_df.copy()
-    risk_df["PQM GRT %"] = risk_df["PQM_GRT_Old"] / risk_df["Total_GRT_Old"] * 100
-    risk_df["PQM FTNR %"] = risk_df["PQM_FTNR"] / risk_df["PQM_Total"] * 100
-
-    risk_branches = risk_df[
-        (risk_df["PQM GRT %"] < 60) |
-        (risk_df["PQM FTNR %"] > 8)
-    ]["Branch"].nunique()
-
-    best_zone = (
-        filtered_df.groupby("Zone")
-        .apply(lambda x: x["PQM_GRT_Old"].sum() / x["Total_GRT_Old"].sum() * 100)
-        .idxmax()
-    )
-
-    high_risk_zone = (
-        filtered_df.groupby("Zone")
-        .apply(lambda x: x["PQM_FTNR"].sum() / x["PQM_Total"].sum() * 100)
-        .idxmax()
-    )
-
-    s1, s2, s3 = st.columns(3)
-
-    with s1:
-        st.success(f"🏆 Best Zone: {best_zone}")
-    with s2:
-        st.error(f"⚠ Risk Branches: {risk_branches}")
-    with s3:
-        st.warning(f"🚨 Highest FTNR Zone: {high_risk_zone}")
-
-    st.markdown("---")
-
-    st.markdown("## 🔥 CEO Action Alerts")
-
-    alert_df = risk_df[
-        (risk_df["PQM GRT %"] < 60) |
-        (risk_df["PQM FTNR %"] > 8)
-    ][[
-        "Zone", "State", "Branch", "PQM_GRT_Old",
-        "PQM GRT %", "PQM FTNR %", "Total_Disbursed", "Disbursed_Amount"
-    ]]
-
-    alert_df = alert_df.sort_values(
-        by=["PQM FTNR %", "PQM GRT %"],
-        ascending=[False, True]
-    ).head(20)
-
-    st.dataframe(alert_df.round(2), use_container_width=True, height=520)
-
-    st.stop()
 
 # ================= NORMAL KPI =================
 
