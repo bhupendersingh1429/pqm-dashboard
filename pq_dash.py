@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="PQM Dashboard", layout="wide", page_icon="📊")
 
@@ -106,8 +105,6 @@ df = load_data()
 
 st.sidebar.title("📌 Filters")
 
-
-
 zone_list = sorted(df["Zone"].dropna().unique())
 zone_filter = st.sidebar.multiselect("Zone", zone_list)
 
@@ -149,8 +146,6 @@ else:
 
 # ================= HEADER =================
 
-from datetime import datetime, timedelta
-
 as_of_date = (datetime.today() - timedelta(days=1)).strftime("%d-%b-%Y")
 
 st.markdown("""
@@ -175,13 +170,13 @@ branch_ftnr_percent = (
     filtered_df["Branch_FTNR"].sum()
     / filtered_df["Branch_Total"].sum()
     * 100
-)
+) if filtered_df["Branch_Total"].sum() else 0
 
 pqm_ftnr_percent = (
     filtered_df["PQM_FTNR"].sum()
     / filtered_df["PQM_Total"].sum()
     * 100
-)
+) if filtered_df["PQM_Total"].sum() else 0
 
 total_disbursed_amount = filtered_df["Disbursed_Amount"].sum()
 
@@ -193,7 +188,7 @@ def kpi_card(title, value, color):
     </div>
     """, unsafe_allow_html=True)
 
-# ================= NORMAL KPI =================
+# ================= KPI =================
 
 k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 
@@ -272,7 +267,7 @@ with c2:
         color="PQM_FTNR_Percent"
     )
 
-    fig2.update_traces(texttemplate="%{text}%")
+    fig2.update_traces(texttemplate="%{text}%", textposition="inside")
     fig2.update_layout(
         height=420,
         plot_bgcolor="white",
@@ -323,14 +318,29 @@ with c4:
         "Greater_2": "mean"
     })
 
+    tat_data = tat_data.sort_values("Same_Day", ascending=True)
+
     fig4 = go.Figure()
+
+    tat_colors = {
+        "Same_Day": "#0b70c9",
+        "T1": "#7ec0ee",
+        "T2": "#ff2b2b",
+        "Greater_2": "#ffa6a6"
+    }
 
     for col in ["Same_Day", "T1", "T2", "Greater_2"]:
         fig4.add_trace(go.Bar(
             name=col,
             y=tat_data[chart_level],
             x=tat_data[col],
-            orientation="h"
+            orientation="h",
+            marker=dict(color=tat_colors[col]),
+            text=tat_data[col].round(1),
+            texttemplate="%{text}%",
+            textposition="inside",
+            insidetextanchor="middle",
+            hovertemplate=f"{col}: %{{x:.1f}}%<extra></extra>"
         ))
 
     fig4.update_layout(
@@ -341,8 +351,14 @@ with c4:
         yaxis_title="",
         plot_bgcolor="white",
         paper_bgcolor="white",
-        title_font_size=22
+        title_font_size=22,
+        legend_title_text="",
+        uniformtext_minsize=10,
+        uniformtext_mode="hide",
+        margin=dict(l=20, r=20, t=60, b=40)
     )
+
+    fig4.update_xaxes(range=[0, 100])
 
     st.plotly_chart(fig4, use_container_width=True)
 
