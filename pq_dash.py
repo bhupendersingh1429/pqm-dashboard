@@ -33,20 +33,20 @@ st.markdown("""
 }
 .kpi-card {
     background:white;
-    padding:18px 8px;
-    border-radius:22px;
+    padding:15px 6px;
+    border-radius:20px;
     box-shadow:0 10px 28px rgba(0,0,0,0.12);
     text-align:center;
-    height:128px;
+    height:125px;
     border-top:7px solid;
 }
 .kpi-title {
-    font-size:13px;
+    font-size:12px;
     color:#666;
     font-weight:800;
 }
 .kpi-value {
-    font-size:25px;
+    font-size:22px;
     color:#171717;
     font-weight:900;
     margin-top:16px;
@@ -64,14 +64,15 @@ def load_data():
         sheet_name="Branch Summary",
         header=None,
         skiprows=4,
-        usecols="A:AD"
+        usecols="A:AF"
     )
 
     df.columns = [
         "Zone", "Region", "State", "DM_Name", "PQM_Name", "PQM_Emp_ID", "Branch",
         "Branch_GRT_Old", "PQM_GRT_Old", "Total_GRT_Old", "GRT_Old_Percent",
         "Branch_GRT", "PQM_GRT", "Total_GRT", "GRT_Percent",
-        "Total_Disbursed", "Disbursed_Amount",
+        "Total_Ujala_Plus_DB", "Ujala_Plus_Amount",
+        "Ujala_Plus_DB_PQ", "Ujala_Plus_Amount_PQ",
         "FTNR_PreApproved", "Received_HO", "FTNR_HO_Percent",
         "Branch_FTNR", "Branch_Total", "Branch_FTNR_Percent",
         "PQM_FTNR", "PQM_Total", "PQM_FTNR_Percent",
@@ -162,6 +163,7 @@ st.markdown(
 # ================= KPI CALCULATION =================
 
 total_branches = filtered_df["Branch"].nunique()
+
 total_grt = filtered_df["Total_GRT_Old"].sum()
 pqm_grt = filtered_df["PQM_GRT_Old"].sum()
 pqm_grt_percent = pqm_grt / total_grt * 100 if total_grt else 0
@@ -178,7 +180,8 @@ pqm_ftnr_percent = (
     * 100
 ) if filtered_df["PQM_Total"].sum() else 0
 
-total_disbursed_amount = filtered_df["Disbursed_Amount"].sum()
+total_ujala_amount = filtered_df["Ujala_Plus_Amount"].sum()
+pqm_ujala_amount = filtered_df["Ujala_Plus_Amount_PQ"].sum()
 
 def kpi_card(title, value, color):
     st.markdown(f"""
@@ -190,7 +193,7 @@ def kpi_card(title, value, color):
 
 # ================= KPI =================
 
-k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
 
 with k1:
     kpi_card("Branches", f"{total_branches:,.0f}", "#071f4d")
@@ -205,7 +208,9 @@ with k5:
 with k6:
     kpi_card("PQM FTNR %", f"{pqm_ftnr_percent:.2f}%", "#7030a0")
 with k7:
-    kpi_card("Pre-Approved DB Amt", f"₹ {total_disbursed_amount/10000000:.2f} Cr", "#ed7d31")
+    kpi_card("Total Ujala Plus Amt", f"₹ {total_ujala_amount/10000000:.2f} Cr", "#ed7d31")
+with k8:
+    kpi_card("Ujala Plus by PQ Amt", f"₹ {pqm_ujala_amount/10000000:.2f} Cr", "#00a6d6")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -283,18 +288,18 @@ c3, c4 = st.columns(2)
 
 with c3:
     disb_data = filtered_df.groupby(chart_level, as_index=False).agg({
-        "Disbursed_Amount": "sum"
+        "Ujala_Plus_Amount": "sum"
     })
 
-    disb_data["Disbursed_Cr"] = disb_data["Disbursed_Amount"] / 10000000
+    disb_data["Ujala_Cr"] = disb_data["Ujala_Plus_Amount"] / 10000000
 
     fig3 = px.pie(
         disb_data,
         names=chart_level,
-        values="Disbursed_Amount",
+        values="Ujala_Plus_Amount",
         hole=0.55,
-        title=f"Disbursed Amount by {chart_level}",
-        custom_data=["Disbursed_Cr"]
+        title=f"Ujala Plus Amount by {chart_level}",
+        custom_data=["Ujala_Cr"]
     )
 
     fig3.update_traces(
@@ -368,7 +373,7 @@ st.markdown("## 🔝 Top 10 & Bottom 10 Branches")
 
 ranking_option = st.selectbox(
     "Ranking Base Select Kijiye",
-    ["PQM GRT %", "PQM FTNR %", "Total Disbursement"]
+    ["PQM GRT %", "PQM FTNR %", "Total Ujala Plus DB"]
 )
 
 rank_df = filtered_df.copy()
@@ -376,13 +381,13 @@ rank_df = filtered_df.copy()
 rank_df["PQM GRT No."] = rank_df["PQM_GRT_Old"]
 rank_df["PQM GRT %"] = rank_df["PQM_GRT_Old"] / rank_df["Total_GRT_Old"] * 100
 rank_df["PQM FTNR %"] = rank_df["PQM_FTNR"] / rank_df["PQM_Total"] * 100
-rank_df["Total Disbursement"] = rank_df["Total_Disbursed"]
+rank_df["Total Ujala Plus DB"] = rank_df["Total_Ujala_Plus_DB"]
 
 rank_df = rank_df[[
     "Zone", "State", "Branch",
     "PQM GRT No.", "PQM GRT %",
     "PQM FTNR %",
-    "Total Disbursement"
+    "Total Ujala Plus DB"
 ]]
 
 rank_df = rank_df.dropna(subset=[ranking_option])
@@ -398,14 +403,14 @@ top10 = top10.round({
     "PQM GRT No.": 0,
     "PQM GRT %": 2,
     "PQM FTNR %": 2,
-    "Total Disbursement": 0
+    "Total Ujala Plus DB": 0
 })
 
 bottom10 = bottom10.round({
     "PQM GRT No.": 0,
     "PQM GRT %": 2,
     "PQM FTNR %": 2,
-    "Total Disbursement": 0
+    "Total Ujala Plus DB": 0
 })
 
 t1, t2 = st.columns(2)
@@ -426,7 +431,8 @@ summary = filtered_df[[
     "Zone", "State", "Region", "DM_Name", "PQM_Name", "Branch",
     "Total_GRT_Old", "PQM_GRT_Old", "GRT_Old_Percent",
     "Total_GRT", "PQM_GRT", "GRT_Percent",
-    "Total_Disbursed", "Disbursed_Amount",
+    "Total_Ujala_Plus_DB", "Ujala_Plus_Amount",
+    "Ujala_Plus_DB_PQ", "Ujala_Plus_Amount_PQ",
     "Branch_FTNR_Percent",
     "PQM_FTNR_Percent",
     "Same_Day", "T1", "T2", "Greater_2"
