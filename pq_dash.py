@@ -130,6 +130,19 @@ branch_filter = st.sidebar.multiselect("Branch", branch_list)
 if len(branch_filter) == 0:
     branch_filter = branch_list
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 Ujala Plus Chart")
+
+ujala_chart_option = st.sidebar.selectbox(
+    "Chart Metric Select Kijiye",
+    [
+        "Total Ujala Plus Amount",
+        "Ujala Plus by PQ Amount",
+        "Total Ujala Plus DB",
+        "Ujala Plus by PQ DB"
+    ]
+)
+
 filtered_df = df[
     (df["Zone"].isin(zone_filter)) &
     (df["State"].isin(state_filter)) &
@@ -286,46 +299,71 @@ with c2:
 
 c3, c4 = st.columns(2)
 
-# ================= PIE CHART WITH SELECTION =================
+# ================= DYNAMIC UJALA PLUS CHART =================
 
 with c3:
-    amount_option = st.radio(
-        "Pie Chart Amount Select Kijiye",
-        ["Total Ujala Plus Amount", "Ujala Plus by PQ Amount"],
-        horizontal=True
-    )
+    if ujala_chart_option == "Total Ujala Plus Amount":
+        value_col = "Ujala_Plus_Amount"
+        chart_title = f"Total Ujala Plus Amount by {chart_level}"
+        is_amount = True
 
-    if amount_option == "Total Ujala Plus Amount":
-        amount_col = "Ujala_Plus_Amount"
-        chart_title = f"Ujala Plus Amount by {chart_level}"
-    else:
-        amount_col = "Ujala_Plus_Amount_PQ"
+    elif ujala_chart_option == "Ujala Plus by PQ Amount":
+        value_col = "Ujala_Plus_Amount_PQ"
         chart_title = f"Ujala Plus by PQ Amount by {chart_level}"
+        is_amount = True
+
+    elif ujala_chart_option == "Total Ujala Plus DB":
+        value_col = "Total_Ujala_Plus_DB"
+        chart_title = f"Total Ujala Plus DB by {chart_level}"
+        is_amount = False
+
+    else:
+        value_col = "Ujala_Plus_DB_PQ"
+        chart_title = f"Ujala Plus by PQ DB by {chart_level}"
+        is_amount = False
 
     disb_data = filtered_df.groupby(chart_level, as_index=False).agg({
-        amount_col: "sum"
+        value_col: "sum"
     })
 
-    disb_data["Amount_Cr"] = disb_data[amount_col] / 10000000
+    disb_data = disb_data[disb_data[value_col] > 0]
+
+    if is_amount:
+        disb_data["Display_Value"] = disb_data[value_col] / 10000000
+        text_template = "₹ %{customdata[0]:.2f} Cr"
+        hover_template = "%{label}<br>Amount: ₹ %{customdata[0]:.2f} Cr<br>Share: %{percent}<extra></extra>"
+    else:
+        disb_data["Display_Value"] = disb_data[value_col]
+        text_template = "%{customdata[0]:,.0f}"
+        hover_template = "%{label}<br>DB: %{customdata[0]:,.0f}<br>Share: %{percent}<extra></extra>"
 
     fig3 = px.pie(
         disb_data,
         names=chart_level,
-        values=amount_col,
-        hole=0.55,
+        values=value_col,
+        hole=0.58,
         title=chart_title,
-        custom_data=["Amount_Cr"]
+        custom_data=["Display_Value"]
     )
 
     fig3.update_traces(
-        texttemplate="₹ %{customdata[0]:.2f} Cr",
-        textposition="inside"
+        texttemplate=text_template,
+        textposition="inside",
+        hovertemplate=hover_template
     )
 
     fig3.update_layout(
         height=420,
         paper_bgcolor="white",
-        title_font_size=22
+        title_font_size=22,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.25,
+            xanchor="center",
+            x=0.5
+        )
     )
 
     st.plotly_chart(fig3, use_container_width=True)
