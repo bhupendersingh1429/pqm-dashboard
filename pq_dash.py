@@ -18,9 +18,33 @@ st.markdown("""
 [data-testid="stSidebar"] {
     background: linear-gradient(180deg,#071f4d,#0b3b82);
 }
-[data-testid="stSidebar"] * {
+
+/* Sidebar headings/labels white */
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
     color:white;
 }
+
+/* Select / Multiselect box text black */
+[data-testid="stSidebar"] div[data-baseweb="select"] * {
+    color:black !important;
+}
+[data-testid="stSidebar"] input {
+    color:black !important;
+}
+[data-testid="stSidebar"] div[data-baseweb="tag"] span {
+    color:white !important;
+}
+
+/* Dropdown options */
+div[data-baseweb="popover"] * {
+    color:black !important;
+}
+
 .main-title {
     background: linear-gradient(90deg,#071f4d,#0b5cad,#00a6d6);
     padding:24px;
