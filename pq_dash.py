@@ -286,20 +286,35 @@ with c2:
 
 c3, c4 = st.columns(2)
 
+# ================= PIE CHART WITH SELECTION =================
+
 with c3:
+    amount_option = st.radio(
+        "Pie Chart Amount Select Kijiye",
+        ["Total Ujala Plus Amount", "Ujala Plus by PQ Amount"],
+        horizontal=True
+    )
+
+    if amount_option == "Total Ujala Plus Amount":
+        amount_col = "Ujala_Plus_Amount"
+        chart_title = f"Ujala Plus Amount by {chart_level}"
+    else:
+        amount_col = "Ujala_Plus_Amount_PQ"
+        chart_title = f"Ujala Plus by PQ Amount by {chart_level}"
+
     disb_data = filtered_df.groupby(chart_level, as_index=False).agg({
-        "Ujala_Plus_Amount": "sum"
+        amount_col: "sum"
     })
 
-    disb_data["Ujala_Cr"] = disb_data["Ujala_Plus_Amount"] / 10000000
+    disb_data["Amount_Cr"] = disb_data[amount_col] / 10000000
 
     fig3 = px.pie(
         disb_data,
         names=chart_level,
-        values="Ujala_Plus_Amount",
+        values=amount_col,
         hole=0.55,
-        title=f"Ujala Plus Amount by {chart_level}",
-        custom_data=["Ujala_Cr"]
+        title=chart_title,
+        custom_data=["Amount_Cr"]
     )
 
     fig3.update_traces(
