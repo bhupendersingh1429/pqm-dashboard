@@ -18,8 +18,6 @@ st.markdown("""
 [data-testid="stSidebar"] {
     background: linear-gradient(180deg,#071f4d,#0b3b82);
 }
-
-/* Sidebar headings/labels white */
 [data-testid="stSidebar"] label,
 [data-testid="stSidebar"] p,
 [data-testid="stSidebar"] span,
@@ -28,8 +26,6 @@ st.markdown("""
 [data-testid="stSidebar"] h3 {
     color:white;
 }
-
-/* Select / Multiselect box text black */
 [data-testid="stSidebar"] div[data-baseweb="select"] * {
     color:black !important;
 }
@@ -39,12 +35,9 @@ st.markdown("""
 [data-testid="stSidebar"] div[data-baseweb="tag"] span {
     color:white !important;
 }
-
-/* Dropdown options */
 div[data-baseweb="popover"] * {
     color:black !important;
 }
-
 .main-title {
     background: linear-gradient(90deg,#071f4d,#0b5cad,#00a6d6);
     padding:24px;
@@ -131,16 +124,14 @@ df = load_data()
 st.sidebar.title("📌 Filters")
 
 zone_list = sorted(df["Zone"].dropna().unique())
-zone_filter = st.sidebar.multiselect("Zone", zone_list)
+selected_zone = st.sidebar.multiselect("Zone", zone_list)
 
-if len(zone_filter) == 0:
-    zone_filter = zone_list
+zone_filter = selected_zone if len(selected_zone) > 0 else zone_list
 
 state_list = sorted(df[df["Zone"].isin(zone_filter)]["State"].dropna().unique())
-state_filter = st.sidebar.multiselect("State", state_list)
+selected_state = st.sidebar.multiselect("State", state_list)
 
-if len(state_filter) == 0:
-    state_filter = state_list
+state_filter = selected_state if len(selected_state) > 0 else state_list
 
 branch_list = sorted(
     df[
@@ -149,10 +140,9 @@ branch_list = sorted(
     ]["Branch"].dropna().unique()
 )
 
-branch_filter = st.sidebar.multiselect("Branch", branch_list)
+selected_branch = st.sidebar.multiselect("Branch", branch_list)
 
-if len(branch_filter) == 0:
-    branch_filter = branch_list
+branch_filter = selected_branch if len(selected_branch) > 0 else branch_list
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 Ujala Plus Chart")
@@ -175,9 +165,11 @@ filtered_df = df[
 
 # ================= DYNAMIC CHART LEVEL =================
 
-if len(zone_filter) == 1 and len(state_filter) == 1:
+if len(selected_branch) > 0:
     chart_level = "Branch"
-elif len(zone_filter) == 1:
+elif len(selected_state) > 0:
+    chart_level = "Branch"
+elif len(selected_zone) == 1:
     chart_level = "State"
 else:
     chart_level = "Zone"
@@ -265,6 +257,8 @@ with c1:
         grt_data["PQM_GRT_Old"] / grt_data["Total_GRT_Old"] * 100
     )
 
+    grt_data = grt_data.dropna(subset=["PQM_GRT_Percent"])
+
     fig1 = px.bar(
         grt_data,
         x=chart_level,
@@ -297,6 +291,7 @@ with c2:
         pqm_data["PQM_FTNR"] / pqm_data["PQM_Total"] * 100
     )
 
+    pqm_data = pqm_data.dropna(subset=["PQM_FTNR_Percent"])
     pqm_data = pqm_data.sort_values("PQM_FTNR_Percent", ascending=True)
 
     fig2 = px.bar(
