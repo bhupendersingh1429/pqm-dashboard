@@ -162,7 +162,7 @@ def aggregate(df, level, days):
         records.append(row)
     result=pd.DataFrame(records)
     if not result.empty:
-        result.insert(0,'Name',result[keys].astype(str).agg(' / '.join,axis=1))
+        result.insert(0,'Name',result[level].astype(str))
     return result
 
 def main():
@@ -218,7 +218,7 @@ def main():
     def cards(items):
         for col,(label,metric,kind) in zip(st.columns(len(items)),items):
             col.metric(label,fmt(total[metric],kind))
-    cards([('Branches','Branches','number'),('Staff','Staff','number'),('Total GRT','Total GRT','number'),('PQM GRT','PQM GRT','number'),('PQM GRT %','PQM GRT %','percent')])
+    cards([('Branches','Branches','number'),('Total GRT','Total GRT','number'),('PQM GRT','PQM GRT','number'),('PQM GRT %','PQM GRT %','percent')])
     cards([('Ujala CB to DB','Ujala CB to DB','number'),('Ujala Amount*','Ujala DB Amount','amount'),('Physical PD','Physical PD','number'),('Video PD','Video PD','number'),('PQM FTNR %','PQM FTNR %','percent')])
     tabs=st.tabs(['Overview','GRT & TAT','Ujala','Physical & Video PD','Quality','Productivity','Summary & Checks'])
     def chart(metric,title,container=st):
