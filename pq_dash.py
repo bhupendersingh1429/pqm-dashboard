@@ -1,287 +1,297 @@
-"""Run: streamlit run pq_dashboard_updated.py
-Install: pip install streamlit pandas plotly pyxlsb openpyxl
-Source: latest report layout (Branch Summary A:AN, header in row 4).
-Upload .xlsb/.xlsx or place Report.xlsb / Report.xlsx beside this script.
-"""
+"""PQM summary dashboard. Run: streamlit run pq_dash.py"""
 from pathlib import Path
 from io import BytesIO
+from html import escape
+import hashlib
+import hmac
+import os
+from numbers import Real
+import posixpath
 import re
+import tempfile
+import zipfile
+import xml.etree.ElementTree as ET
+
 import pandas as pd
 
-COLS = [
-    'Zone','State','RM','DM','PQM','Employee ID','Branch',
-    'Branch GRT','PQM GRT','Total GRT','GRT Daily Source','GRT % Source',
-    'Ujala CB to DB','Last Day STH','Last Day DB','Ujala Daily Source','Ujala DB Amount',
-    'Physical PD','Last Day Physical PD','PD Daily Source','Video PD','Last Day Video PD',
-    'VPD Daily Source','Branch FTNR','Branch FTNR Base','Branch FTNR % Source',
-    'PQM FTNR','PQM FTNR Base','PQM FTNR % Source',
-    'Same Day Source','T+1 Source','T+2 Source','>2 Source',
-    'GRT Minutes','Ujala Minutes','PD Minutes','VPD Minutes','Total Minutes',
-    'Effective Productivity Source','Designation']
-TEXT = COLS[:7] + ['Designation']
-ADDITIVE = ['Branch GRT','PQM GRT','Total GRT','Ujala CB to DB','Last Day STH',
-    'Last Day DB','Ujala DB Amount','Physical PD','Last Day Physical PD',
-    'Video PD','Last Day Video PD','Branch FTNR','Branch FTNR Base',
-    'PQM FTNR','PQM FTNR Base','Physical PD Declined','Video PD Declined']
-TAT = ['Same Day','T+1','T+2','>2']
+NS = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+SHEETS = {'Zone': ('Zone Summary', 3, 37),
+          'Region(AVP)': ('Region(AVP) Summary', 4, 38),
+          'DM': ('DM Summary', 4, 38),
+          'PQM': ('PQM Summary', 8, 42)}
+BASE = Path(__file__).resolve().parent
 
-def text(value):
-    return '' if pd.isna(value) else str(value).strip()
 
-def engine_for(name):
-    return 'pyxlsb' if name.lower().endswith('.xlsb') else 'openpyxl'
-
-def strict_sum(s):
-    # Missing/error values are unknown, never silently counted as zero.
-    return s.sum() if len(s) and s.notna().all() else float('nan')
-
-def ratio(a,b):
-    return a / b * 100 if pd.notna(a) and pd.notna(b) and b > 0 else float('nan')
-
-def load_report(raw, name):
-    book = pd.ExcelFile(BytesIO(raw), engine=engine_for(name))
-    source = pd.read_excel(book, sheet_name='Branch Summary', header=None)
-    if source.shape[1] < 40 or source.shape[0] < 5:
-        raise ValueError('Branch Summary needs the latest 40-column layout with headers in row 4.')
-    headers = [text(x) for x in source.iloc[3,:7]]
-    if headers != ['Zone','State','RM Name','DM Name','PQM Name','PQM Emp ID','Branch']:
-        raise ValueError('Unexpected Branch Summary headers. Expected Zone, State, RM Name, DM Name, PQM Name, PQM Emp ID, Branch in row 4.')
-    df = source.iloc[4:,:40].copy()
-    df.columns = COLS
-    df = df[df['Branch'].notna() & df['Zone'].notna()].copy()
-    for c in TEXT:
-        df[c] = df[c].map(text)
-    df = df[~df['Zone'].str.casefold().eq('total')].copy()
-    for c in set(COLS)-set(TEXT):
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-    df['Team'] = df['DM'].str.casefold().eq('central pq').map({True:'Central PQ',False:'Field PQ'})
-    df.loc[df['Team'].eq('Central PQ'),'RM'] = 'Central PQ'
-    df['RM'] = df['RM'].replace({'':'Unmapped RM','-':'Unmapped RM'})
-    df['DM'] = df['DM'].replace({'':'Unmapped DM','-':'Unmapped DM'})
-    if df['Employee ID'].duplicated().any() or df['Employee ID'].eq('').any():
-        raise ValueError('Missing or duplicate employee IDs in Branch Summary. Resolve mapping before loading.')
-    notes = []
-    # Count performed/declined cases by actual employee, not the customer branch.
-    # This retains Video PD work on non-PQ customer branches.
-    for sheet, id_col, metric, last, decline in [
-        ('PD','PD done ID','Physical PD','Last Day Physical PD','Physical PD Declined'),
-        ('Video PD','Video PD done ID','Video PD','Last Day Video PD','Video PD Declined')]:
-        if sheet not in book.sheet_names:
-            df[decline] = float('nan')
-            notes.append(f'{sheet} detail sheet missing; decline counts unavailable.')
-            continue
-        detail = pd.read_excel(book,sheet_name=sheet)
-        detail.columns = [text(c) for c in detail.columns]
-        required = [id_col,'DM','Done by',"Today's or not",'Declined Status']
-        if not set(required).issubset(detail.columns):
-            df[decline] = float('nan')
-            notes.append(f'{sheet} detail headers incomplete; using summary counts.')
-            continue
-        detail = detail[detail['Customer Number'].notna()].copy() if 'Customer Number' in detail else detail
-        detail['_id'] = detail[id_col].map(text).str.upper()
-        detail['_dm'] = detail['DM'].map(text)
-        known = set(df['Employee ID'].str.upper())
-        unknown = ~detail['_id'].isin(known)
-        # Keep unmapped work visible, scoped to its DM. No invented RM allocation.
-        for dm in detail.loc[unknown,'_dm'].unique():
-            part = unknown & detail['_dm'].eq(dm)
-            key = ('UNMAPPED::' + (dm or 'Unknown DM')).upper()
-            detail.loc[part,'_id'] = key
-            if key not in set(df['Employee ID']):
-                same_dm = df[df['DM'].eq(dm)]
-                rms = same_dm['RM'].unique()
-                central = dm.casefold() == 'central pq'
-                row = {c:float('nan') for c in COLS if c not in TEXT}
-                row.update({c:'' for c in TEXT})
-                row.update({c:0 for c in ['Physical PD','Last Day Physical PD','Physical PD Declined','Video PD','Last Day Video PD','Video PD Declined']})
-                row.update({'RM':'Central PQ' if central else (rms[0] if len(rms)==1 else 'Unmapped RM'),
-                    'DM':dm or 'Unknown DM','PQM':'Unmapped activity','Employee ID':key,
-                    'Branch':'Unmapped activity','Team':'Central PQ' if central else 'Field PQ',
-                    'Designation':'Unmapped'})
-                df = pd.concat([df,pd.DataFrame([row])],ignore_index=True)
-        counts = detail.groupby('_id').size()
-        daily = detail[detail["Today's or not"].map(text).str.casefold().eq('yes')].groupby('_id').size()
-        declined = detail[detail['Declined Status'].map(text).str.casefold().eq('declined')].groupby('_id').size()
-        previous = df[metric].sum()
-        df[metric] = df['Employee ID'].str.upper().map(counts).fillna(0)
-        df[last] = df['Employee ID'].str.upper().map(daily).fillna(0)
-        df[decline] = df['Employee ID'].str.upper().map(declined).fillna(0)
-        if previous != len(detail):
-            notes.append(f'{metric}: Branch Summary {previous:,.0f}; detail {len(detail):,}. Dashboard uses detail counts; unmapped activity remains visible.')
-    # Synthetic unmapped rows have no summary activities beyond PD/VPD.
-    synthetic = df['Employee ID'].str.startswith('UNMAPPED::')
-    for c in ['Branch GRT','PQM GRT','Total GRT','Ujala CB to DB','Last Day STH','Last Day DB','Ujala DB Amount','PQM FTNR','PQM FTNR Base']:
-        df.loc[synthetic,c] = 0
-    asof = 'Date unavailable'
-    for value in source.iloc[:4].values.ravel():
-        match = re.search(r'As of\s+(\d{1,2}-[A-Za-z]{3}-\d{4})',str(value),re.I)
-        if match:
-            asof = match.group(1)
-            break
-    days = pd.to_numeric(pd.Series([source.iat[1,41] if source.shape[1]>41 else None]),errors='coerce').iloc[0]
-    if not pd.notna(days) or days <= 0:
-        days = None
-        notes.append('Working days unavailable; daily productivity needs a valid working-day value.')
-    if df['Branch FTNR'].isna().any():
-        notes.append('Branch FTNR contains missing/error values. Affected totals and percentages display N/A.')
-    if 'Ujala Summary' in book.sheet_names:
-        uj = pd.read_excel(book,sheet_name='Ujala Summary',header=None,nrows=3)
-        uj_amount = pd.to_numeric(pd.Series([uj.iat[1,7]]),errors='coerce').iloc[0]
-        summary_amount = df['Ujala DB Amount'].sum()
-        if pd.notna(uj_amount) and uj_amount != summary_amount:
-            notes.append(f'Ujala amount differs: Branch Summary Rs {summary_amount:,.0f}; Ujala Summary Rs {uj_amount:,.0f}. Dashboard uses Branch Summary, labelled accordingly.')
-    return df, asof, days, notes
-
-def aggregate(df, level, days):
-    keys = {'RM':['RM'],'DM':['RM','DM'],'Branch':['RM','DM','Branch']}[level]
-    records=[]
-    for key,g in df.groupby(keys,dropna=False,sort=True):
-        key = key if isinstance(key,tuple) else (key,)
-        row=dict(zip(keys,key))
-        staff=g[~g['Employee ID'].str.startswith('UNMAPPED::')]
-        field=staff[staff['Team'].eq('Field PQ')]
-        row['Branches']=field['Branch'].nunique()
-        row['Staff']=staff['Employee ID'].nunique()
-        for c in ADDITIVE:
-            scope = g if c in ['Physical PD','Last Day Physical PD','Video PD','Last Day Video PD','Physical PD Declined','Video PD Declined'] else g[g['Team'].eq('Field PQ')]
-            row[c]=strict_sum(scope[c]) if c in scope else float('nan')
-        row['PQM GRT %']=ratio(row['PQM GRT'],row['Total GRT'])
-        row['PQM FTNR %']=ratio(row['PQM FTNR'],row['PQM FTNR Base'])
-        row['Branch FTNR %']=ratio(row['Branch FTNR'],row['Branch FTNR Base'])
-        row['Physical PD Decline %']=ratio(row['Physical PD Declined'],row['Physical PD'])
-        row['Video PD Decline %']=ratio(row['Video PD Declined'],row['Video PD'])
-        for c in ['PQM GRT','Ujala CB to DB','Physical PD','Video PD']:
-            row[c+' / Staff / Day'] = row[c]/row['Staff']/days if row['Staff'] and days else float('nan')
-        # Reconstruct TAT bucket counts, weighting by each row's PQM GRT.
-        active=staff[staff['PQM GRT'].gt(0)]
-        for c in TAT:
-            row[c+' %']=ratio(strict_sum(active[c+' Source']*active['PQM GRT']),strict_sum(active['PQM GRT']))
-        for c in ['GRT Minutes','Ujala Minutes','PD Minutes','VPD Minutes','Total Minutes']:
-            row[c+' / Staff']=strict_sum(staff[c])/len(staff) if len(staff) else float('nan')
-        row['Effective Productivity %']=strict_sum(staff['Effective Productivity Source'])/len(staff)*100 if len(staff) else float('nan')
-        records.append(row)
-    result=pd.DataFrame(records)
-    if not result.empty:
-        result.insert(0,'Name',result[level].astype(str))
+def colnum(ref):
+    result = 0
+    for c in re.match(r'[A-Z]+', ref)[0]:
+        result = result * 26 + ord(c) - 64
     return result
+
+
+def coord(ref):
+    return int(re.search(r'\d+', ref)[0]), colnum(ref)
+
+
+def load_report(raw):
+    """Read only summary XML and cached results; never recompute business logic."""
+    result = {}
+    with zipfile.ZipFile(BytesIO(raw)) as z:
+        if sum(i.file_size for i in z.infolist()) > 800_000_000:
+            raise ValueError('Workbook is too large. Please upload a smaller report.')
+        strings = []
+        if 'xl/sharedStrings.xml' in z.namelist():
+            strings = [''.join(t.text or '' for t in si.findall('.//s:t', NS))
+                       for si in ET.fromstring(z.read('xl/sharedStrings.xml'))]
+        rels = {r.attrib['Id']: r.attrib['Target'] for r in
+                ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))}
+        sheets = {}
+        for sh in ET.fromstring(z.read('xl/workbook.xml')).find('s:sheets', NS):
+            rid = sh.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id']
+            target = rels[rid]
+            sheets[sh.attrib['name']] = (target.lstrip('/') if target.startswith('/')
+                                        else posixpath.normpath('xl/' + target))
+        for level, (name, ids, width) in SHEETS.items():
+            if name not in sheets:
+                raise ValueError(f'Missing sheet: {name}. Upload the Combined PQM Report .xlsx.')
+            root = ET.fromstring(z.read(sheets[name]))
+            cells, missing = {}, 0
+            for cell in root.findall('s:sheetData/s:row/s:c', NS):
+                r, c = coord(cell.attrib['r'])
+                if c > width:
+                    continue
+                v = cell.find('s:v', NS)
+                value = v.text if v is not None else None
+                kind = cell.attrib.get('t')
+                if kind == 's' and value is not None:
+                    value = strings[int(value)]
+                elif kind == 'inlineStr':
+                    value = ''.join(t.text or '' for t in cell.findall('.//s:t', NS))
+                elif value is not None and kind not in ('e', 'str'):
+                    try:
+                        value = float(value)
+                        if value.is_integer():
+                            value = int(value)
+                    except ValueError:
+                        pass
+                if cell.find('s:f', NS) is not None and value is None:
+                    missing += 1
+                if value is not None:
+                    cells[r, c] = value
+            merges = []
+            for m in root.findall('s:mergeCells/s:mergeCell', NS):
+                a, b = m.attrib['ref'].split(':')
+                r1, c1 = coord(a); r2, c2 = coord(b)
+                if r2 <= 3 and c1 <= width:
+                    merges.append((r1, c1, r2, min(c2, width)))
+            headers = []
+            for c in range(1, width + 1):
+                parts = []
+                for r in range(1, 4):
+                    rr, cc = r, c
+                    for a, b, d, e in merges:
+                        if a <= r <= d and b <= c <= e:
+                            rr, cc = a, b
+                            break
+                    value = str(cells.get((rr, cc), '')).replace('\n', ' ').strip()
+                    if value and not value.startswith('As of') and value not in parts:
+                        parts.append(value)
+                # Identification fields take their nearest header, not a spanning title.
+                headers.append(parts[-1] if c <= ids else ' / '.join(parts))
+            rows, total = [], None
+            for r in sorted({r for r, c in cells if r >= 4}):
+                values = [cells.get((r, c)) for c in range(1, width + 1)]
+                if not any(x is not None and str(x).strip() for x in values[:ids]):
+                    continue
+                if any(str(x).strip().casefold() in ('total', 'grand total') for x in values[:ids]):
+                    total = values
+                else:
+                    rows.append(values)
+            date = next((str(v) for (r, c), v in cells.items()
+                         if r <= 3 and str(v).startswith('As of')), 'Report date unavailable')
+            result[level] = dict(name=name, ids=ids, width=width, cells=cells,
+                                 merges=merges, headers=headers, rows=rows,
+                                 total=total, date=date, missing=missing)
+            if not rows:
+                raise ValueError(f'{name} has no summary rows.')
+    return result
+
+
+def display(value, offset):
+    if value is None:
+        return '—'
+    if not isinstance(value, Real):
+        return str(value)
+    if offset in (19, 27, 33):
+        return f'{value:.2%}'
+    if offset in (4, 7, 11, 18, 23, 28, 29, 30, 31, 32):
+        return f'{value:,.2f}'
+    if offset == 24:
+        return f'₹ {value:,.0f}'
+    return f'{value:,.0f}'
+
+
+def render_table(info, rows, total=None):
+    covered, origins = set(), {}
+    for r1, c1, r2, c2 in info['merges']:
+        origins[r1, c1] = (r2-r1+1, c2-c1+1)
+        covered.update((r, c) for r in range(r1, r2+1) for c in range(c1, c2+1)
+                       if (r, c) != (r1, c1))
+    out = ['<div class="report-scroll"><table class="report"><thead>']
+    for r in range(1, 4):
+        out.append('<tr>')
+        for c in range(1, info['width']+1):
+            if (r, c) in covered:
+                continue
+            rs, cs = origins.get((r, c), (1, 1))
+            text = escape(str(info['cells'].get((r, c), ''))).replace('\n', '<br>')
+            out.append(f'<th rowspan="{rs}" colspan="{cs}">{text}</th>')
+        out.append('</tr>')
+    out.append('</thead><tbody>')
+    for values in rows:
+        out.append('<tr>')
+        for c, v in enumerate(values):
+            label = c < info['ids']
+            out.append(f'<td class="{"label" if label else "number"}">{escape(str(v or "") if label else display(v,c-info["ids"]))}</td>')
+        out.append('</tr>')
+    if total:
+        out.append('<tr class="total">')
+        for c, v in enumerate(total):
+            out.append(f'<td>{escape(str(v or "") if c < info["ids"] else display(v,c-info["ids"]))}</td>')
+        out.append('</tr>')
+    out.append('</tbody></table></div>')
+    return ''.join(out)
+
+
+def atomic_save(path, raw):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(raw)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
 
 def main():
     import streamlit as st
-    import plotly.express as px
-    st.set_page_config(page_title='PQ Performance',page_icon='📊',layout='wide')
-    st.markdown('''<style>.stApp{background:#f3f6fb} [data-testid="stMetric"]{background:white;padding:16px;border-radius:12px;border-top:4px solid #1967ad} h1,h2,h3{color:#103968}</style>''',unsafe_allow_html=True)
-    st.title('PQ Performance Dashboard')
-    st.sidebar.header('Report & Filters')
-    upload=st.sidebar.file_uploader('Latest report',type=['xlsb','xlsx'])
-    if upload:
-        raw,name=upload.getvalue(),upload.name
-    else:
-        candidates=[Path(__file__).parent/n for n in ['Report.xlsb','Report.xlsx']]
-        local=next((p for p in candidates if p.exists()),None)
-        if local is None:
-            st.info('Upload your latest .xlsb or .xlsx report from the sidebar to begin.')
-            st.stop()
-        raw,name=local.read_bytes(),local.name
+    st.set_page_config(page_title='PQM Dashboard', layout='wide')
+    st.markdown('''<style>
+    .stApp{background:#f4f7fb}.block-container{padding-top:2rem}
+    .hero{background:linear-gradient(100deg,#102b50,#0b7496);color:white;padding:24px 30px;border-radius:16px;margin-bottom:20px}
+    .hero h1{margin:0;font-size:30px}.hero p{margin:6px 0 0;color:#deedf4}
+    .report-scroll{overflow:auto;max-height:670px;border:1px solid #d7e0eb;border-radius:10px;background:white}
+    .report{border-collapse:separate;border-spacing:0;font:12px Arial;min-width:100%}
+    .report th{background:#133d65;color:white;min-width:95px;padding:11px 9px;border-right:1px solid #4b6984;border-bottom:1px solid #4b6984;text-align:center}
+    .report thead{position:sticky;top:0;z-index:2}.report td{padding:9px 12px;border-right:1px solid #e0e6ef;border-bottom:1px solid #e0e6ef;white-space:nowrap;text-align:right}
+    .report td.label{text-align:left}.report tbody tr:nth-child(even){background:#f0f5fa}
+    .report tbody tr:hover{background:#e2f1fa}.report tr.total{background:#d9e8f5;font-weight:bold}
+    </style>''', unsafe_allow_html=True)
+    st.markdown('<div class="hero"><h1>PQM Dashboard</h1><p>Summary reports · Process &amp; Quality</p></div>', unsafe_allow_html=True)
+    def setting(name):
+        try:
+            return st.secrets.get(name, os.environ.get(name, ''))
+        except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
+            return os.environ.get(name, '')
+    directory = setting('PQM_REPORT_DIR')
+    shared_path = Path(directory) / 'Report.xlsx' if directory else None
+    source = shared_path if shared_path and shared_path.exists() else BASE / 'Report.xlsx'
+    st.sidebar.title('Report controls')
+    level = st.sidebar.selectbox('Summary', list(SHEETS))
+    if st.sidebar.button('Refresh report'):
+        st.rerun()
+    password = setting('PQM_ADMIN_PASSWORD')
+    with st.sidebar.expander('Upload latest report'):
+        st.caption('An upload preview is visible only in your current session.')
+        upload = st.file_uploader('Combined PQM Report', type=['xlsx'])
+        if upload is not None and st.button('Preview uploaded report'):
+            raw = upload.getvalue()
+            try:
+                load_report(raw)
+                st.session_state['preview'] = raw
+                st.session_state['preview_name'] = upload.name
+                st.rerun()
+            except Exception as e:
+                st.error(f'Cannot read report: {e}')
+        if 'preview' in st.session_state:
+            if password and shared_path:
+                token = st.text_input('Admin password', type='password')
+                if st.button('Publish report for all users'):
+                    if hmac.compare_digest(token, str(password)):
+                        try:
+                            atomic_save(shared_path, st.session_state['preview'])
+                            del st.session_state['preview']
+                            st.success('Shared report updated.')
+                            st.rerun()
+                        except OSError as e:
+                            st.error(f'Could not save the shared report: {e}')
+                    else:
+                        st.error('Incorrect password.')
+            else:
+                st.info('Shared publishing needs an admin password and a persistent report folder. You can also replace Report.xlsx in the deployed repository.')
+            if st.button('Return to shared report'):
+                del st.session_state['preview']
+                st.rerun()
     try:
-        data,asof,report_days,notes=st.cache_data(show_spinner='Reading report...')(load_report)(raw,name)
-    except Exception as exc:
-        st.error(f'Could not read report: {exc}')
+        raw = st.session_state.get('preview')
+        if raw is None:
+            raw = source.read_bytes()
+        cached_load = st.cache_data(show_spinner='Reading summaries…')(load_report)
+        reports = cached_load(raw)
+    except Exception as e:
+        st.error(f'Could not open report: {e}')
+        st.info('Place the new Combined PQM Report next to pq_dash.py, named Report.xlsx.')
         st.stop()
-    st.caption(f'As of {asof} • {name}')
-    days=st.sidebar.number_input('Working days',min_value=1,value=int(report_days or 1))
-    if report_days is None:
-        st.warning('Working days were not found. Set the correct value in the sidebar before using productivity.')
-    team=st.sidebar.radio('Team',['Field PQ','Central PQ','All Teams'])
-    f=data.copy() if team=='All Teams' else data[data['Team'].eq(team)].copy()
-    def select(column,label):
-        nonlocal f
-        options=sorted(f[column].dropna().unique())
-        chosen=st.sidebar.multiselect(label,options,key=team+'_'+column)
-        if chosen:
-            f=f[f[column].isin(chosen)]
-        return chosen
-    rms=select('RM','RM Name')
-    dms=select('DM','DM Name')
-    branches=select('Branch','Branch')
-    if f.empty:
-        st.info('No records match these filters.')
+    info = reports[level]
+    st.subheader(info['name'])
+    st.caption(info['date'])
+    if 'preview' in st.session_state:
+        st.warning('Upload preview — other users are still viewing the shared report.')
+    else:
+        st.caption(f'Shared report · {hashlib.sha256(raw).hexdigest()[:8]}')
+    if info['missing']:
+        st.error('Some formula results are missing. Open the workbook in Excel, recalculate, save, and upload again.')
         st.stop()
-    default='Branch' if dms or branches else ('DM' if rms else 'RM')
-    level=st.sidebar.selectbox('Comparison level',['RM','DM','Branch'],index=['RM','DM','Branch'].index(default))
-    summary=aggregate(f,level,days)
-    total=aggregate(f.assign(RM='Selection'),'RM',days).iloc[0]
-    def fmt(v,kind='number'):
-        if pd.isna(v): return 'N/A'
-        if kind=='amount':return f'₹ {v/10000000:.2f} Cr'
-        if kind=='percent':return f'{v:.2f}%'
-        return f'{v:,.0f}'
-    def cards(items):
-        for col,(label,metric,kind) in zip(st.columns(len(items)),items):
-            col.metric(label,fmt(total[metric],kind))
-    cards([('Branches','Branches','number'),('Total GRT','Total GRT','number'),('PQM GRT','PQM GRT','number'),('PQM GRT %','PQM GRT %','percent')])
-    cards([('Ujala CB to DB','Ujala CB to DB','number'),('Ujala Amount*','Ujala DB Amount','amount'),('Physical PD','Physical PD','number'),('Video PD','Video PD','number'),('PQM FTNR %','PQM FTNR %','percent')])
-    tabs=st.tabs(['Overview','GRT & TAT','Ujala','Physical & Video PD','Quality','Productivity','Summary & Checks'])
-    def chart(metric,title,container=st):
-        valid=summary.dropna(subset=[metric]).sort_values(metric)
-        if valid.empty:
-            container.info(f'{title}: no valid data.')
-            return
-        fig=px.bar(valid,x=metric,y='Name',orientation='h',text_auto='.2f' if '%' in metric or '/ Day' in metric else ',.0f',title=title,color_discrete_sequence=['#1967ad'])
-        fig.update_layout(height=max(360,len(valid)*30+100),yaxis_title='',paper_bgcolor='white',plot_bgcolor='white')
-        container.plotly_chart(fig,use_container_width=True)
-    with tabs[0]:
-        chart('PQM GRT %',f'PQM GRT Contribution by {level}')
-        chart('Physical PD',f'Physical PD by {level}')
-        chart('Video PD',f'Video PD by {level}')
-    with tabs[1]:
-        chart('PQM GRT',f'PQM GRT by {level}')
-        valid=summary.dropna(subset=[c+' %' for c in TAT])
-        if not valid.empty:
-            fig=px.bar(valid,y='Name',x=[c+' %' for c in TAT],orientation='h',barmode='stack',title='CGT to GRT TAT — weighted by PQM GRT')
-            fig.update_layout(height=max(360,len(valid)*30+100),yaxis_title='')
-            st.plotly_chart(fig,use_container_width=True)
-    with tabs[2]:
-        st.caption('*Ujala amount and CB-to-DB count use Branch Summary. They are not relabelled as total company Ujala disbursements.')
-        for metric in ['Ujala CB to DB','Ujala DB Amount','Last Day STH','Last Day DB']:
-            chart(metric,f'{metric} by {level}')
-    with tabs[3]:
-        st.caption('Performed and declined counts come from PD/Video PD detail sheets where available. Declined cases are already included in total cases; do not add them again.')
-        for metric in ['Last Day Physical PD','Last Day Video PD','Physical PD Declined','Video PD Declined']:
-            chart(metric,f'{metric} by {level}')
-    with tabs[4]:
-        chart('PQM FTNR %',f'PQM FTNR % by {level} — lower is better')
-        chart('Branch FTNR %',f'Branch FTNR % by {level}')
-        st.caption('PQM FTNR scope: Regular + Ujala + Physical PD. Ratios are recalculated from counts; unknown source counts remain N/A.')
-    with tabs[5]:
-        st.caption('Daily rates = activity count / mapped staff / working days, including mapped staff with zero activity. Unmapped activity has no extra staff denominator. Time and effective productivity are averages of report values across mapped staff; incomplete values remain N/A. These are report estimates, not measured attendance hours.')
-        for metric in ['PQM GRT / Staff / Day','Ujala CB to DB / Staff / Day','Physical PD / Staff / Day','Video PD / Staff / Day','Effective Productivity %']:
-            chart(metric,f'{metric} by {level}')
-    with tabs[6]:
-        st.subheader(f'{level}-wise Summary')
-        st.dataframe(summary.round(2),use_container_width=True,hide_index=True)
-        st.download_button('Download current summary (CSV)',summary.to_csv(index=False).encode('utf-8-sig'),file_name=f'PQ_{level}_Summary.csv',mime='text/csv')
-        st.subheader('Source reconciliation')
-        if notes:
-            for note in notes: st.warning(note)
-        else:st.success('No source discrepancies detected by the available checks.')
-        st.caption('Central PQ staff are excluded from physical branch counts. Unmapped activity stays visible under its known DM; it is never assigned to an individual by guesswork. This file is a current snapshot; monthly comparisons require historical reports.')
-        with st.expander('Filtered source rows'):
-            st.dataframe(f,use_container_width=True,hide_index=True)
-    st.subheader(f'Top & Bottom {level} Performance')
-    metric=st.selectbox('Ranking metric',['PQM GRT %','PQM FTNR %','Ujala CB to DB','Physical PD','Video PD','Effective Productivity %'])
-    eligible=summary.dropna(subset=[metric]).copy()
-    if metric in ['Physical PD','Video PD','Effective Productivity %']:
-        eligible=eligible[eligible['Staff'].gt(0)]
-    eligible=eligible.sort_values([metric,'Name'],ascending=[metric=='PQM FTNR %',True])
-    count=min(10,len(eligible))
-    if len(eligible)<20:
-        st.caption('Fewer than 20 groups: Top and Bottom lists may overlap.')
-    a,b=st.columns(2)
-    display=['Name','Staff','Branches',metric]
-    a.markdown(f'**Top {count}**')
-    a.dataframe(eligible.head(count)[display].round(2),hide_index=True,use_container_width=True)
-    b.markdown(f'**Bottom {count}**')
-    b.dataframe(eligible.tail(count).iloc[::-1][display].round(2),hide_index=True,use_container_width=True)
+    df = pd.DataFrame(info['rows'], columns=info['headers'])
+    filtered = df.copy()
+    for c in range(info['ids']):
+        # Counts are metrics, not entity filters.
+        if info['headers'][c].lower().startswith('no'):
+            continue
+        series = filtered.iloc[:, c].fillna('').astype(str)
+        choices = sorted(x for x in series.unique() if x)
+        selected = st.sidebar.multiselect(info['headers'][c], choices, key=f'{level}-{c}')
+        if selected:
+            filtered = filtered[series.isin(selected)]
+    search = st.text_input('Search visible summary', placeholder='Name, branch, region…')
+    if search:
+        mask = filtered.iloc[:, :info['ids']].fillna('').astype(str).apply(
+            lambda col: col.str.contains(search, case=False, regex=False)).any(axis=1)
+        filtered = filtered[mask]
+    all_rows = len(filtered) == len(df)
+    def sum_col(offset):
+        s = pd.to_numeric(filtered.iloc[:, info['ids']+offset], errors='coerce')
+        return s.sum() if len(s) and s.notna().all() else None
+    cols = st.columns(5)
+    for column, label, off in zip(cols[:4], ['PD Allocated', 'PD Conducted', 'PD DB Amount (Cr)', 'Ujala DB Amount'], [0, 1, 11, 24]):
+        value = sum_col(off)
+        column.metric(label, '—' if value is None else display(value, off))
+    numerator, denominator = sum_col(25), sum_col(26)
+    cols[4].metric('FTNR', f'{numerator / denominator:.2%}'
+                   if numerator is not None and denominator else '—')
+    st.caption(f'{len(filtered):,} of {len(df):,} rows · Scroll horizontally to see all metrics.')
+    if filtered.empty:
+        st.info('No matching rows. Clear the filters or search.')
+    else:
+        st.markdown(render_table(info, filtered.values.tolist(), info['total'] if all_rows else None), unsafe_allow_html=True)
+    st.caption('Figures come directly from the selected Excel summary. The Excel total is shown only for the full view. Filtered percentages are not averaged.')
+    st.download_button('Download selected rows (CSV)', filtered.to_csv(index=False).encode('utf-8-sig'),
+                       file_name=f'PQM_{level.replace("(AVP)", "")}_summary.csv', mime='text/csv')
+    st.download_button('Download full Excel report', raw, file_name='Combined_PQM_Report.xlsx',
+                       mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-if __name__=='__main__':
+
+if __name__ == '__main__':
     main()
