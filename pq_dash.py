@@ -189,6 +189,7 @@ def main():
     st.markdown('''<style>
     .stApp{background:#f4f7fb}.block-container{padding-top:2rem}
     .hero{background:linear-gradient(100deg,#102b50,#0b7496);color:white;padding:24px 30px;border-radius:16px;margin-bottom:20px}
+    .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;margin:14px 0 20px}.kpi-tile{background:white;border:1px solid #dce5ef;border-top:3px solid #167b9d;border-radius:10px;padding:13px 15px}.kpi-label{font-size:12px;color:#536579;min-height:32px}.kpi-number{font-size:23px;font-weight:700;color:#123956;white-space:nowrap}
     .hero h1{margin:0;font-size:30px}.hero p{margin:6px 0 0;color:#deedf4}
     .report-scroll{overflow:auto;max-height:670px;border:1px solid #d7e0eb;border-radius:10px;background:white}
     .report{border-collapse:separate;border-spacing:0;font:12px Arial;min-width:100%}
@@ -299,25 +300,39 @@ def main():
             filtered = (branch_rows[branch_rows['Branch'].fillna('').astype(str).isin(selected_branches)] if selected_branches else branch_rows).copy()
             branch_detail = True
             st.caption('PQ branch performance for the selected Zone / Region · Source: PQM Summary. Clear Zone, Region and PQ Branch filters to return to the summary view.')
-    search = st.text_input('Search visible summary', placeholder='Name, branch, region…')
-    if search:
-        mask = filtered.iloc[:, :info['ids']].fillna('').astype(str).apply(
-            lambda col: col.str.contains(search, case=False, regex=False)).any(axis=1)
-        filtered = filtered[mask]
     all_rows = not branch_detail and len(filtered) == len(df)
     def sum_col(offset):
         s = pd.to_numeric(filtered.iloc[:, info['ids']+offset], errors='coerce')
         return s.sum() if len(s) and s.notna().all() else None
-    cols = st.columns(5)
-    for column, label, off in zip(cols[:4], ['PD Allocated', 'PD Conducted', 'PD DB Amount (Cr)', 'Ujala DB Amount'], [0, 1, 11, 24]):
+    # Counts and amounts are additive; rates are ratios of matching totals.
+    specs = [
+        ('PD Allocated', 0), ('PD Conducted', 1), ('Physical PD CGT', 2),
+        ('Physical PD Conducted', 3), ('Video PD GRT', 5), ('Video PD Conducted', 6),
+        ('STH', 8), ('Sanctioned', 9), ('PD Disbursed', 10), ('PD DB Amount (Cr)', 11),
+        ('Declined', 12), ('PD Attempted / Pending', 13), ('PD Pending', 14),
+        ('Branch GRT', 15), ('PQM GRT', 16), ('Total GRT', 17), ('PQM GRT %', 19),
+        ('Ujala CB to DB', 20), ('Ujala STH — Last Day', 21), ('Ujala DB — Last Day', 22),
+        ('Ujala DB Amount (Cr)', 24), ('FTNR Cases', 25), ('FTNR Total GRT', 26), ('FTNR %', 27)]
+    cards = ['<div class="kpi-grid">']
+    for label, off in specs:
         value = sum_col(off)
-        column.metric(label, '—' if value is None else display(value, off))
-    numerator, denominator = sum_col(25), sum_col(26)
-    cols[4].metric('FTNR', f'{numerator / denominator:.2%}'
-                   if numerator is not None and denominator else '—')
+        if off in (19, 27):
+            numerator, denominator = (sum_col(16), sum_col(17)) if off == 19 else (sum_col(25), sum_col(26))
+            value = numerator / denominator if numerator is not None and denominator else None
+        if value is None:
+            formatted = '—'
+        elif off == 24:
+            formatted = f'₹ {value / 10000000:,.2f} Cr'
+        elif off == 11:
+            formatted = f'₹ {value:,.2f} Cr'
+        else:
+            formatted = display(value, off)
+        cards.append(f'<div class="kpi-tile"><div class="kpi-label">{escape(label)}</div><div class="kpi-number">{escape(formatted)}</div></div>')
+    cards.append('</div>')
+    st.markdown(''.join(cards), unsafe_allow_html=True)
     st.caption(f'{len(filtered):,} branch detail rows · Scroll horizontally to see all metrics.' if branch_detail else f'{len(filtered):,} of {len(df):,} rows · Scroll horizontally to see all metrics.')
     if filtered.empty:
-        st.info('No matching rows. Clear the filters or search.')
+        st.info('No matching rows. Clear the filters.')
     else:
         st.markdown(render_table(info, filtered.values.tolist(), info['total'] if all_rows else None), unsafe_allow_html=True)
     st.caption('Figures come directly from the selected Excel summary. The Excel total is shown only for the full view. Filtered percentages are not averaged.')
