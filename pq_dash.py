@@ -132,6 +132,13 @@ def display(value, offset):
 
 
 def render_table(info, rows, total=None):
+    frozen = {'Zone Summary': [1], 'Region(AVP) Summary': [1, 2],
+              'DM Summary': [1, 2], 'PQM Summary': [8]}[info['name']]
+    def pin(column):
+        if column not in frozen:
+            return ''
+        left = frozen.index(column) * 160
+        return f' class="frozen" style="left:{left}px;min-width:160px;width:160px;max-width:160px;box-sizing:border-box"'
     covered, origins = set(), {}
     for r1, c1, r2, c2 in info['merges']:
         origins[r1, c1] = (r2-r1+1, c2-c1+1)
@@ -145,19 +152,20 @@ def render_table(info, rows, total=None):
                 continue
             rs, cs = origins.get((r, c), (1, 1))
             text = escape(str(info['cells'].get((r, c), ''))).replace('\n', '<br>')
-            out.append(f'<th rowspan="{rs}" colspan="{cs}">{text}</th>')
+            out.append(f'<th{pin(c)} rowspan="{rs}" colspan="{cs}">{text}</th>')
         out.append('</tr>')
     out.append('</thead><tbody>')
     for values in rows:
         out.append('<tr>')
         for c, v in enumerate(values):
             label = c < info['ids']
-            out.append(f'<td class="{"label" if label else "number"}">{escape(str(v or "") if label else display(v,c-info["ids"]))}</td>')
+            attrs = pin(c+1) if c+1 in frozen else f' class="{"label" if label else "number"}"'
+            out.append(f'<td{attrs}>{escape(str(v or "") if label else display(v,c-info["ids"]))}</td>')
         out.append('</tr>')
     if total:
         out.append('<tr class="total">')
         for c, v in enumerate(total):
-            out.append(f'<td>{escape(str(v or "") if c < info["ids"] else display(v,c-info["ids"]))}</td>')
+            out.append(f'<td{pin(c+1)}>{escape(str(v or "") if c < info["ids"] else display(v,c-info["ids"]))}</td>')
         out.append('</tr>')
     out.append('</tbody></table></div>')
     return ''.join(out)
@@ -187,7 +195,13 @@ def main():
     .report th{background:#133d65;color:white;min-width:95px;padding:11px 9px;border-right:1px solid #4b6984;border-bottom:1px solid #4b6984;text-align:center}
     .report thead{position:sticky;top:0;z-index:2}.report td{padding:9px 12px;border-right:1px solid #e0e6ef;border-bottom:1px solid #e0e6ef;white-space:nowrap;text-align:right}
     .report td.label{text-align:left}.report tbody tr:nth-child(even){background:#f0f5fa}
-    .report tbody tr:hover{background:#e2f1fa}.report tr.total{background:#d9e8f5;font-weight:bold}
+    .report tbody tr:hover{background:#e2f1fa}
+    .report .frozen{position:sticky;left:0;text-align:left;white-space:normal;overflow-wrap:anywhere;box-shadow:2px 0 3px #c4d3e3}
+    .report td.frozen{z-index:1;background:#fff}
+    .report tbody tr:nth-child(even) td.frozen{background:#f0f5fa}
+    .report tbody tr:hover td.frozen{background:#e2f1fa}
+    .report th.frozen{z-index:4;background:#133d65}
+    .report tr.total td.frozen{background:#d9e8f5}.report tr.total{background:#d9e8f5;font-weight:bold}
     </style>''', unsafe_allow_html=True)
     st.markdown('<div class="hero"><h1>PQM Dashboard</h1><p>Summary reports · Process &amp; Quality</p></div>', unsafe_allow_html=True)
     def setting(name):
@@ -256,6 +270,8 @@ def main():
         st.stop()
     df = pd.DataFrame(info['rows'], columns=info['headers'])
     filtered = df.copy()
+    entity_filters = {}
+    branch_detail = False
     for c in range(info['ids']):
         # Counts are metrics, not entity filters.
         if info['headers'][c].lower().startswith('no'):
@@ -264,13 +280,30 @@ def main():
         choices = sorted(x for x in series.unique() if x)
         selected = st.sidebar.multiselect(info['headers'][c], choices, key=f'{level}-{c}')
         if selected:
+            entity_filters[info['headers'][c]] = selected
             filtered = filtered[series.isin(selected)]
+    if level in ('Zone', 'Region(AVP)'):
+        pq_info = reports['PQM']
+        branch_rows = pd.DataFrame(pq_info['rows'], columns=pq_info['headers'])
+        for field, chosen in entity_filters.items():
+            if field in branch_rows.columns:
+                branch_rows = branch_rows[branch_rows[field].fillna('').astype(str).isin(chosen)]
+        branches = sorted(x for x in branch_rows['Branch'].dropna().astype(str).unique() if x.strip() and x != '-')
+        selected_branches = st.sidebar.multiselect('PQ Branch', branches, key=f'{level}-branch')
+        if selected_branches:
+            if pq_info['missing']:
+                st.error('PQM formula results are missing. Recalculate and save the Excel report first.')
+                st.stop()
+            info = pq_info
+            filtered = branch_rows[branch_rows['Branch'].fillna('').astype(str).isin(selected_branches)].copy()
+            branch_detail = True
+            st.caption('Selected branch details · Source: PQM Summary. Clear PQ Branch to return to the full summary layout.')
     search = st.text_input('Search visible summary', placeholder='Name, branch, region…')
     if search:
         mask = filtered.iloc[:, :info['ids']].fillna('').astype(str).apply(
             lambda col: col.str.contains(search, case=False, regex=False)).any(axis=1)
         filtered = filtered[mask]
-    all_rows = len(filtered) == len(df)
+    all_rows = not branch_detail and len(filtered) == len(df)
     def sum_col(offset):
         s = pd.to_numeric(filtered.iloc[:, info['ids']+offset], errors='coerce')
         return s.sum() if len(s) and s.notna().all() else None
@@ -281,7 +314,7 @@ def main():
     numerator, denominator = sum_col(25), sum_col(26)
     cols[4].metric('FTNR', f'{numerator / denominator:.2%}'
                    if numerator is not None and denominator else '—')
-    st.caption(f'{len(filtered):,} of {len(df):,} rows · Scroll horizontally to see all metrics.')
+    st.caption(f'{len(filtered):,} branch detail rows · Scroll horizontally to see all metrics.' if branch_detail else f'{len(filtered):,} of {len(df):,} rows · Scroll horizontally to see all metrics.')
     if filtered.empty:
         st.info('No matching rows. Clear the filters or search.')
     else:
