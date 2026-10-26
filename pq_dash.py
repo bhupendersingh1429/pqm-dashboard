@@ -189,7 +189,10 @@ def main():
     st.markdown('''<style>
     .stApp{background:#f4f7fb}.block-container{padding-top:2rem}
     .hero{background:linear-gradient(100deg,#102b50,#0b7496);color:white;padding:24px 30px;border-radius:16px;margin-bottom:20px}
-    .kpi-group-title{font-size:15px;font-weight:700;color:#123956;margin-top:12px}.kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:12px;margin:14px 0 20px}.kpi-tile{background:white;border:1px solid #dce5ef;border-top:3px solid #167b9d;border-radius:10px;padding:13px 15px}.kpi-label{font-size:12px;color:#536579;min-height:32px}.kpi-number{font-size:23px;font-weight:700;color:#123956;white-space:nowrap}
+    .kpi-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:10px 0 14px}.kpi-tile{background:white;border:1px solid #dce5ef;border-top:3px solid #167b9d;border-radius:8px;padding:8px 10px;min-width:0}.kpi-group-label{font-size:10px;line-height:14px;color:#167b9d;font-weight:700}.kpi-label{font-size:11px;line-height:14px;color:#536579;min-height:28px;overflow-wrap:anywhere}.kpi-number{font-size:clamp(15px,1.45vw,21px);line-height:26px;font-weight:700;color:#123956;overflow-wrap:anywhere}
+    @media(max-width:900px){.kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+    @media(max-width:480px){.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
     .hero h1{margin:0;font-size:30px}.hero p{margin:6px 0 0;color:#deedf4}
     .report-scroll{overflow:auto;max-height:670px;border:1px solid #d7e0eb;border-radius:10px;background:white}
     .report{border-collapse:separate;border-spacing:0;font:12px Arial;min-width:100%}
@@ -330,9 +333,8 @@ def main():
         if not valid.any() or values[valid].isna().any():
             return None
         return (values[valid] * weights[valid]).sum() / weights[valid].sum()
-    cards = []
+    cards = ['<div class="kpi-grid">']
     for group, specs in groups:
-        cards.append(f'<div class="kpi-group-title">{escape(group)}</div><div class="kpi-grid">')
         for label, off in specs:
             value = effective_productivity() if off == 33 else sum_col(off)
             if off in (19, 27):
@@ -346,8 +348,8 @@ def main():
                 formatted = f'₹ {value:,.2f} Cr'
             else:
                 formatted = display(value, off)
-            cards.append(f'<div class="kpi-tile"><div class="kpi-label">{escape(label)}</div><div class="kpi-number">{escape(formatted)}</div></div>')
-        cards.append('</div>')
+            cards.append(f'<div class="kpi-tile"><div class="kpi-group-label">{escape(group)}</div><div class="kpi-label">{escape(label)}</div><div class="kpi-number">{escape(formatted)}</div></div>')
+    cards.append('</div>')
     st.markdown(''.join(cards), unsafe_allow_html=True)
     st.caption(f'{len(filtered):,} branch detail rows · Scroll horizontally to see all metrics.' if branch_detail else f'{len(filtered):,} of {len(df):,} rows · Scroll horizontally to see all metrics.')
     if filtered.empty:
