@@ -368,10 +368,7 @@ def main():
     else:
         st.markdown(render_table(info, filtered.values.tolist(), info['total'] if all_rows else None), unsafe_allow_html=True)
     st.caption('Figures come directly from the selected Excel summary. The Excel total is shown only for the full view. Filtered percentages are not averaged.')
-    st.download_button('Download selected rows (CSV)', filtered.to_csv(index=False).encode('utf-8-sig'),
-                       file_name=f'PQM_{level.replace("(AVP)", "")}_summary.csv', mime='text/csv')
-    st.download_button('Download full Excel report', raw, file_name='Combined_PQM_Report.xlsx',
-                       mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
 
 
 if __name__ == '__main__':
