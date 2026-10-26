@@ -290,7 +290,7 @@ def main():
                 branch_rows = branch_rows[branch_rows[field].fillna('').astype(str).isin(chosen)]
         branches = sorted(x for x in branch_rows['Branch'].dropna().astype(str).unique() if x.strip() and x != '-')
         selected_branches = st.sidebar.multiselect('PQ Branch', branches, key=f'{level}-branch')
-        if selected_branches or entity_filters:
+        if selected_branches or (level == 'Region(AVP)' and entity_filters.get('Region AVP')):
             branch_rows = branch_rows[branch_rows['Branch'].fillna('').astype(str).str.strip().ne('') & branch_rows['Branch'].fillna('').astype(str).str.strip().ne('-')]
             if pq_info['missing']:
                 st.error('PQM formula results are missing. Recalculate and save the Excel report first.')
