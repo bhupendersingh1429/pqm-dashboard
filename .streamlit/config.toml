@@ -1,0 +1,2 @@
+[global]
+minCachedMessageSize = 1e12
