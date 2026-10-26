@@ -286,15 +286,16 @@ def main():
         if selected:
             entity_filters[info['headers'][c]] = selected
             filtered = filtered[series.isin(selected)]
-    if level in ('Zone', 'Region(AVP)'):
+    if level in ('Zone', 'Region(AVP)', 'DM'):
         pq_info = reports['PQM']
         branch_rows = pd.DataFrame(pq_info['rows'], columns=pq_info['headers'])
         for field, chosen in entity_filters.items():
+            field = 'RM Name' if field == 'RM' else field
             if field in branch_rows.columns:
                 branch_rows = branch_rows[branch_rows[field].fillna('').astype(str).isin(chosen)]
         branches = sorted(x for x in branch_rows['Branch'].dropna().astype(str).unique() if x.strip() and x != '-')
-        selected_branches = st.sidebar.multiselect('PQ Branch', branches, key=f'{level}-branch')
-        if selected_branches or (level == 'Region(AVP)' and entity_filters.get('Region AVP')):
+        selected_branches = st.sidebar.multiselect('PQ Branch', branches, key=f'{level}-branch', disabled=(level == 'DM' and not entity_filters.get('DM Name')))
+        if selected_branches or (level == 'Region(AVP)' and entity_filters.get('Region AVP')) or (level == 'DM' and entity_filters.get('DM Name')):
             branch_rows = branch_rows[branch_rows['Branch'].fillna('').astype(str).str.strip().ne('') & branch_rows['Branch'].fillna('').astype(str).str.strip().ne('-')]
             if pq_info['missing']:
                 st.error('PQM formula results are missing. Recalculate and save the Excel report first.')
@@ -302,7 +303,7 @@ def main():
             info = pq_info
             filtered = (branch_rows[branch_rows['Branch'].fillna('').astype(str).isin(selected_branches)] if selected_branches else branch_rows).copy()
             branch_detail = True
-            st.caption('PQ branch performance for the selected Zone / Region · Source: PQM Summary. Clear Zone, Region and PQ Branch filters to return to the summary view.')
+            st.caption('PQ branch performance for the selected filters · Source: PQM Summary.')
     all_rows = not branch_detail and len(filtered) == len(df)
     def sum_col(offset):
         if filtered.empty:
