@@ -305,7 +305,17 @@ def main():
             st.caption('PQ branch performance for the selected Zone / Region · Source: PQM Summary. Clear Zone, Region and PQ Branch filters to return to the summary view.')
     all_rows = not branch_detail and len(filtered) == len(df)
     def sum_col(offset):
-        s = pd.to_numeric(filtered.iloc[:, info['ids']+offset], errors='coerce')
+        if filtered.empty:
+            return None
+        if all_rows and info['total'] is not None:
+            total_value = info['total'][info['ids']+offset]
+            if isinstance(total_value, Real):
+                return total_value
+        raw_values = filtered.iloc[:, info['ids']+offset]
+        # Excel uses '-' for non-applicable counts (e.g. Other Branches GRT).
+        # Exclude that explicit marker, but keep real missing/error values unknown.
+        applicable = raw_values[~raw_values.map(lambda x: isinstance(x, str) and x.strip() == '-')]
+        s = pd.to_numeric(applicable, errors='coerce')
         return s.sum() if len(s) and s.notna().all() else None
     # Counts and amounts are additive; rates are ratios of matching totals.
     groups = [
