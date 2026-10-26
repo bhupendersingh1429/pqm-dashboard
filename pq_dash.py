@@ -290,14 +290,15 @@ def main():
                 branch_rows = branch_rows[branch_rows[field].fillna('').astype(str).isin(chosen)]
         branches = sorted(x for x in branch_rows['Branch'].dropna().astype(str).unique() if x.strip() and x != '-')
         selected_branches = st.sidebar.multiselect('PQ Branch', branches, key=f'{level}-branch')
-        if selected_branches:
+        if selected_branches or entity_filters:
+            branch_rows = branch_rows[branch_rows['Branch'].fillna('').astype(str).str.strip().ne('') & branch_rows['Branch'].fillna('').astype(str).str.strip().ne('-')]
             if pq_info['missing']:
                 st.error('PQM formula results are missing. Recalculate and save the Excel report first.')
                 st.stop()
             info = pq_info
-            filtered = branch_rows[branch_rows['Branch'].fillna('').astype(str).isin(selected_branches)].copy()
+            filtered = (branch_rows[branch_rows['Branch'].fillna('').astype(str).isin(selected_branches)] if selected_branches else branch_rows).copy()
             branch_detail = True
-            st.caption('Selected branch details · Source: PQM Summary. Clear PQ Branch to return to the full summary layout.')
+            st.caption('PQ branch performance for the selected Zone / Region · Source: PQM Summary. Clear Zone, Region and PQ Branch filters to return to the summary view.')
     search = st.text_input('Search visible summary', placeholder='Name, branch, region…')
     if search:
         mask = filtered.iloc[:, :info['ids']].fillna('').astype(str).apply(
