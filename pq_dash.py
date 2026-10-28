@@ -1,14 +1,9 @@
 """PQM summary dashboard. Run: streamlit run pq_dash.py"""
-from pathlib import Path
 from io import BytesIO
 from html import escape
-import hashlib
-import hmac
-import os
 from numbers import Real
 import posixpath
 import re
-import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -19,9 +14,6 @@ SHEETS = {'Zone': ('Zone Summary', 3, 37),
           'Region(AVP)': ('Region(AVP) Summary', 4, 38),
           'DM': ('DM Summary', 4, 38),
           'PQM': ('PQM Summary', 8, 42)}
-BASE = Path(__file__).resolve().parent
-
-
 def colnum(ref):
     result = 0
     for c in re.match(r'[A-Z]+', ref)[0]:
@@ -171,18 +163,6 @@ def render_table(info, rows, total=None):
     return ''.join(out)
 
 
-def atomic_save(path, raw):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix='.tmp')
-    try:
-        with os.fdopen(fd, 'wb') as f:
-            f.write(raw)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
 def main():
     import streamlit as st
     st.set_page_config(page_title='PQM Dashboard', layout='wide')
@@ -207,68 +187,34 @@ def main():
     .report th.frozen{z-index:4;background:#133d65}
     .report tr.total td.frozen{background:#d9e8f5}.report tr.total{background:#d9e8f5;font-weight:bold}
     </style>''', unsafe_allow_html=True)
-    st.markdown('<div class="hero"><h1>PQM Dashboard</h1><p>Summary reports · Process &amp; Quality</p></div>', unsafe_allow_html=True)
-    def setting(name):
-        try:
-            return st.secrets.get(name, os.environ.get(name, ''))
-        except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
-            return os.environ.get(name, '')
-    directory = setting('PQM_REPORT_DIR')
-    shared_path = Path(directory) / 'Report.xlsx' if directory else None
-    source = shared_path if shared_path and shared_path.exists() else BASE / 'Report.xlsx'
-    st.sidebar.title('Report controls')
-    level = st.sidebar.selectbox('Summary', list(SHEETS))
-    if st.sidebar.button('Refresh report'):
-        st.rerun()
-    password = setting('PQM_ADMIN_PASSWORD')
-    with st.sidebar.expander('Upload latest report'):
-        st.caption('An upload preview is visible only in your current session.')
-        upload = st.file_uploader('Combined PQM Report', type=['xlsx'])
-        if upload is not None and st.button('Preview uploaded report'):
-            raw = upload.getvalue()
-            try:
-                load_report(raw)
-                st.session_state['preview'] = raw
-                st.session_state['preview_name'] = upload.name
-                st.rerun()
-            except Exception as e:
-                st.error(f'Cannot read report: {e}')
-        if 'preview' in st.session_state:
-            if password and shared_path:
-                token = st.text_input('Admin password', type='password')
-                if st.button('Publish report for all users'):
-                    if hmac.compare_digest(token, str(password)):
-                        try:
-                            atomic_save(shared_path, st.session_state['preview'])
-                            del st.session_state['preview']
-                            st.success('Shared report updated.')
-                            st.rerun()
-                        except OSError as e:
-                            st.error(f'Could not save the shared report: {e}')
-                    else:
-                        st.error('Incorrect password.')
-            else:
-                st.info('Shared publishing needs an admin password and a persistent report folder. You can also replace Report.xlsx in the deployed repository.')
-            if st.button('Return to shared report'):
-                del st.session_state['preview']
-                st.rerun()
-    try:
-        raw = st.session_state.get('preview')
-        if raw is None:
-            raw = source.read_bytes()
-        cached_load = st.cache_data(show_spinner='Reading summaries…')(load_report)
-        reports = cached_load(raw)
-    except Exception as e:
-        st.error(f'Could not open report: {e}')
-        st.info('Place the new Combined PQM Report next to pq_dash.py, named Report.xlsx.')
+    st.markdown('<div class="hero"><h1>Welcome to the PQM Dashboard Analyser</h1><p>Upload a Combined PQM Report to view the analysis. No report is loaded automatically.</p></div>', unsafe_allow_html=True)
+
+    upload = st.file_uploader(
+        "Upload your Combined PQM Report (.xlsx)",
+        type=["xlsx"],
+        help="Choose the report you want to analyse. Your upload is used for this session only."
+    )
+    if upload is None:
+        st.info("Upload a report to get started. No data or analysis is displayed until a file is uploaded.")
         st.stop()
+
+    raw = upload.getvalue()
+    try:
+        # Deliberately do not cache report contents, to avoid retaining confidential
+        # report data in Streamlit's shared data cache.
+        reports = load_report(raw)
+    except Exception as e:
+        st.error(f"Could not open this report: {e}")
+        st.info("Please upload a valid Combined PQM Report (.xlsx) with the required summary sheets.")
+        st.stop()
+
+    st.sidebar.title("Report controls")
+    level = st.sidebar.selectbox("Summary", list(SHEETS))
     info = reports[level]
     st.subheader(info['name'])
     st.caption(info['date'])
-    if 'preview' in st.session_state:
-        st.warning('Upload preview — other users are still viewing the shared report.')
-    else:
-        st.caption(f'Shared report · {hashlib.sha256(raw).hexdigest()[:8]}')
+    st.caption(f"Analysis of uploaded file: {escape(upload.name)}")
+
     if info['missing']:
         st.error('Some formula results are missing. Open the workbook in Excel, recalculate, save, and upload again.')
         st.stop()
