@@ -10,10 +10,9 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 
 NS = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-SHEETS = {'Zone': ('Zone Summary', 3, 39),
-          'Region(AVP)': ('Region(AVP) Summary', 4, 40),
-          'DM': ('DM Summary', 4, 38),
-          'PQM': ('PQM Summary', 8, 42)}
+SHEETS = {'Zone': 'Zone Summary', 'Region(AVP)': 'Region(AVP) Summary', 'DM': 'DM Summary', 'PQM': 'PQM Summary'}
+IDENTITY = {'Zone': ['Zone','Zonal Name','PQ RM Name'], 'Region(AVP)': ['Zone','Region AVP','Region AVP Name','PQ DM Name'], 'DM': ['RM','DM Name'], 'PQM': ['Zone','Region AVP','State','RM Name','DM Name','PQM Name','PQM EMP ID','Branch']}
+
 def colnum(ref):
     result = 0
     for c in re.match(r'[A-Z]+', ref)[0]:
@@ -43,11 +42,13 @@ def load_report(raw):
             target = rels[rid]
             sheets[sh.attrib['name']] = (target.lstrip('/') if target.startswith('/')
                                         else posixpath.normpath('xl/' + target))
-        for level, (name, ids, width) in SHEETS.items():
+        for level, name in SHEETS.items():
             if name not in sheets:
                 raise ValueError(f'Missing sheet: {name}. Upload the Combined PQM Report .xlsx.')
             root = ET.fromstring(z.read(sheets[name]))
             cells, missing = {}, 0
+            width = max((colnum(c.attrib['r']) for c in root.findall('s:sheetData/s:row/s:c', NS)), default=0)
+            if width < 10 or width > 300: raise ValueError(f'Unexpected number of columns in {name}: {width}')
             for cell in root.findall('s:sheetData/s:row/s:c', NS):
                 r, c = coord(cell.attrib['r'])
                 if c > width:
@@ -77,6 +78,7 @@ def load_report(raw):
                 if r1 <= 3 and c1 <= width:
                     merges.append((r1, c1, r2, min(c2, width)))
             headers = []
+            ids = len(IDENTITY[level]) if level != 'DM' else 4
             for c in range(1, width + 1):
                 parts = []
                 for r in range(1, 4):
@@ -101,6 +103,7 @@ def load_report(raw):
                     rows.append(values)
             date = next((str(v) for (r, c), v in cells.items()
                          if r <= 3 and str(v).startswith('As of')), 'Report date unavailable')
+            # Keep all columns; no hardcoded metric width.
             result[level] = dict(name=name, ids=ids, width=width, cells=cells,
                                  merges=merges, headers=headers, rows=rows,
                                  total=total, date=date, missing=missing)
@@ -109,17 +112,14 @@ def load_report(raw):
     return result
 
 
-def display(value, offset):
-    if value is None:
-        return '—'
-    if not isinstance(value, Real):
-        return str(value)
-    if offset in (22, 30, 36, 19, 27, 33):
+def display(value, header):
+    if value is None: return '—'
+    if not isinstance(value, Real): return str(value)
+    h = str(header).lower()
+    if 'ftnr %' in h or 'grt(%)' in h or 'eff productivity' in h or 'effective productivity' in h:
         return f'{value:.2%}'
-    if offset in (4, 7, 11, 18, 23, 28, 29, 30, 31, 32):
+    if 'productivity' in h or 'time in minutes' in h or 'amount(cr)' in h:
         return f'{value:,.2f}'
-    if offset == 26:
-        return f'₹ {value:,.0f}'
     return f'{value:,.0f}'
 
 
@@ -152,16 +152,19 @@ def render_table(info, rows, total=None):
         for c, v in enumerate(values):
             label = c < info['ids']
             attrs = pin(c+1) if c+1 in frozen else f' class="{"label" if label else "number"}"'
-            out.append(f'<td{attrs}>{escape(str(v or "") if label else display(v,c-info["ids"]))}</td>')
+            out.append(f'<td{attrs}>{escape(str(v or "") if label else display(v,info["headers"][c]))}</td>')
         out.append('</tr>')
     if total:
         out.append('<tr class="total">')
         for c, v in enumerate(total):
-            out.append(f'<td{pin(c+1)}>{escape(str(v or "") if c < info["ids"] else display(v,c-info["ids"]))}</td>')
+            out.append(f'<td{pin(c+1)}>{escape(str(v or "") if c < info["ids"] else display(v,info["headers"][c]))}</td>')
         out.append('</tr>')
     out.append('</tbody></table></div>')
     return ''.join(out)
 
+
+def normalize_filter_header(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
 
 def main():
     import streamlit as st
@@ -224,7 +227,7 @@ def main():
     branch_detail = False
     for c in range(info['ids']):
         # Counts are metrics, not entity filters.
-        if info['headers'][c].lower().startswith('no'):
+        if normalize_filter_header(info['headers'][c]).startswith('no'):
             continue
         series = filtered.iloc[:, c].fillna('').astype(str)
         choices = sorted(x for x in series.unique() if x)
@@ -264,76 +267,117 @@ def main():
         applicable = raw_values[~raw_values.map(lambda x: isinstance(x, str) and x.strip() == '-')]
         s = pd.to_numeric(applicable, errors='coerce')
         return s.sum() if len(s) and s.notna().all() else None
-    # Counts and amounts are additive; rates are ratios of matching totals.
-    # All offsets are relative to each sheet's identification columns.
-    # The new October report adds two metric columns in Zone/Region.
-    # Metric offsets are consistent across the four summary sheets.
-    groups = [
-        ('Vishwas', [('Total Allocated', 0), ('PD Conducted', 1), ('DB', 13), ('DB Amount (Cr)', 14), ('Declined', 15)]),
-        ('GRT', [('PQM GRT', 19), ('GRT % PQM', 22)]),
-        ('Ujala', [('CB to DB', 23), ('DB Amount', 27)]),
-        ('FTNR', [('FTNR %', 30)]),
-        ('Productivity', [('Effective Productivity', 36)])]
-    shift = 3 if level in ('DM', 'PQM') else 0
-    groups = [(g, [(label, off-shift) for label, off in specs]) for g, specs in groups]
-    # In the DM and PQM sheets the identifiers occupy 4 and 8 columns,
-    # and the metrics above still use the same relative offsets.
-    def metric(offset):
-        grt_off, grt_total_off, ftnr_off, ftnr_total_off, prod_off = (22-shift, 20-shift, 30-shift, 29-shift, 36-shift)
-        if offset == grt_off:
-            a, b = sum_col(19-shift), sum_col(grt_total_off)
-            return a / b if a is not None and b else None
-        if offset == ftnr_off:
-            a, b = sum_col(28-shift), sum_col(ftnr_total_off)
-            return a / b if a is not None and b else None
-        if offset == prod_off:
-            if all_rows and info['total'] is not None:
-                v = info['total'][info['ids'] + offset]
-                return v if isinstance(v, Real) else None
-            vals = pd.to_numeric(filtered.iloc[:, info['ids'] + offset], errors='coerce')
-            if len(vals) == 1:
-                return vals.iloc[0]
-            if info['name'] == 'PQM Summary':
-                weights = filtered.iloc[:, 6].fillna('').astype(str).str.strip().map(lambda x: int(bool(x and x != '-')))
+    # Match full metric paths, never fixed Excel column offsets.
+    # A renamed/ambiguous KPI is shown as unavailable rather than a wrong number.
+    def normalize(x):
+        return re.sub(r'[^a-z0-9]+', '', str(x).casefold())
+    def find_metric(path):
+        target = normalize(path)
+        hits = [i for i,h in enumerate(info['headers']) if normalize(h).endswith(target)]
+        return hits[0] if len(hits) == 1 else None
+
+    SPECS = [
+        ('Vishwas', '#Total Allocated', 'count', '#Total Allocated'),
+        ('Vishwas', 'PD Conducted', 'count', '# Total PD Conducted'),
+        ('Vishwas', 'DB', 'count', 'Vishwas Pipeline / # DB'),
+        ('Vishwas', 'DB Amount (Cr)', 'crore', '#DB Amount(Cr)'),
+        ('Vishwas', 'Declined', 'count', 'Vishwas Pipeline / Declined'),
+        ('GRT', 'PQM GRT', 'count', 'Fresh Client GRT / PQM GRT'),
+        ('GRT', 'GRT % PQM', 'grt_rate', 'Fresh Client GRT / GRT(%) PQM'),
+        ('Ujala', 'CB to DB', 'count', 'Ujala / CB to DB'),
+        ('Ujala', 'DB Amount', 'rupees', 'Ujala / DB Amount'),
+        ('FTNR', 'FTNR %', 'ftnr_rate', 'FTNR %'),
+        ('Productivity', 'Effective Productivity', 'weighted_rate', 'Time in Minutes / Eff Productivity'),
+    ]
+    def locate(key):
+        if key == 'Vishwas Pipeline / # DB':
+            hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('vishwaspipeline') and normalize(h).endswith('db') and not normalize(h).endswith('amountcr')]
+            return hits[0] if len(hits)==1 else None
+        if key == 'Vishwas Pipeline / Declined':
+            hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('vishwaspipeline') and normalize(h).endswith('declined')]
+            return hits[0] if len(hits)==1 else None
+        if key == 'Time in Minutes / Eff Productivity':
+            hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('timeinminutes') and (normalize(h).endswith('effproductivity') or normalize(h).endswith('effectiveproductivity'))]
+            return hits[0] if len(hits)==1 else None
+        if key == 'FTNR %':
+            hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('ftnr') and normalize(h).endswith('ftnr')]
+            return hits[0] if len(hits)==1 else None
+        return find_metric(key)
+    def aggregate(idx):
+        if idx is None or filtered.empty: return None
+        if all_rows and info['total'] is not None:
+            v=info['total'][idx]
+            if isinstance(v,Real):return float(v)
+        series=filtered.iloc[:,idx]
+        series=series[~series.map(lambda x:isinstance(x,str) and x.strip()=='-')]
+        numeric=pd.to_numeric(series,errors='coerce')
+        return float(numeric.sum()) if len(numeric) and numeric.notna().all() else None
+    def metric(spec):
+        group,label,kind,key=spec
+        idx=locate(key)
+        if idx is None:return None
+        if kind=='grt_rate':
+            a,b=aggregate(locate('Fresh Client GRT / PQM GRT')),aggregate(locate('Fresh Client GRT / Total'))
+            return a/b if a is not None and b else None
+        if kind=='ftnr_rate':
+            a,b=aggregate(locate('FTNR / PQM(Regular + Ujala +Physical PD)')),aggregate(locate('FTNR / PQM(Regular + Ujala +Physical PD) / Total GRT'))
+            return a/b if a is not None and b else None
+        if kind=='weighted_rate':
+            if all_rows and info['total'] is not None and isinstance(info['total'][idx],Real):return float(info['total'][idx])
+            vals=pd.to_numeric(filtered.iloc[:,idx],errors='coerce')
+            if level=='PQM' or branch_detail:
+                weights=pd.Series(1.0,index=filtered.index)
+                emp_col=next((i for i,h in enumerate(info['headers']) if normalize(h)=='pqmempid'),None)
+                if emp_col is not None:weights=filtered.iloc[:,emp_col].fillna('').astype(str).str.strip().map(lambda x:float(bool(x and x!='-')))
             else:
-                weights = pd.to_numeric(filtered.iloc[:, info['ids']-2], errors='coerce').fillna(0)
-            valid = (weights > 0) & vals.notna()
-            return (vals[valid] * weights[valid]).sum() / weights[valid].sum() if valid.any() else None
-        return sum_col(offset)
-    def fmt(v, off):
-        if v is None or pd.isna(v): return '—'
-        if off in (22-shift,30-shift,36-shift): return f'{v:.1%}'
-        if off == 14-shift: return f'₹{v:,.2f} Cr'
-        if off == 27-shift: return f'₹{v/1e7:,.2f} Cr'
+                count_col=next((i for i,h in enumerate(info['headers']) if normalize(h) in ('noofpqm','noofpqms')),None)
+                if count_col is None:return None
+                weights=pd.to_numeric(filtered.iloc[:,count_col],errors='coerce')
+            valid=(weights>0)&weights.notna()&vals.notna()
+            return float((vals[valid]*weights[valid]).sum()/weights[valid].sum()) if valid.any() else None
+        return aggregate(idx)
+    def fmt(v,kind):
+        if v is None or pd.isna(v):return '—'
+        if kind in ('grt_rate','ftnr_rate','weighted_rate'):return f'{v:.2%}'
+        if kind=='crore':return f'₹{v:,.2f} Cr'
+        if kind=='rupees':return f'₹{v/1e7:,.2f} Cr'
         return f'{v:,.0f}'
-    view = st.radio('Display mode', ['📊 Visual Dashboard', '📋 Table View'], horizontal=True)
-    colors = ['#0ea5e9','#8b5cf6','#f59e0b','#10b981','#ec4899']
-    if view == '📊 Visual Dashboard':
+    view=st.radio('Display mode',['📊 Visual Dashboard','📋 Table View'],horizontal=True)
+    palette={'Vishwas':'#0284c7','GRT':'#7c3aed','Ujala':'#ea580c','FTNR':'#059669','Productivity':'#db2777'}
+    st.markdown("""<style>.stApp{background:linear-gradient(125deg,#f0f7ff,#f9f5ff)}
+    [data-testid="stMetric"]{background:white;border:1px solid #dbeafe;border-radius:14px;padding:16px;box-shadow:0 5px 16px #c8d7ec50}
+    [data-testid="stMetricLabel"]{color:#475569}</style>""",unsafe_allow_html=True)
+    if view=='📊 Visual Dashboard':
         import plotly.express as px
-        st.markdown('<style>.stApp{background:linear-gradient(135deg,#f0f7ff,#faf5ff)}[data-testid="stMetric"]{background:white;border:1px solid #dbeafe;border-radius:14px;padding:16px;box-shadow:0 4px 15px #dbeafe70}</style>', unsafe_allow_html=True)
-        for (group, specs), color in zip(groups, colors):
-            st.markdown(f'<h3 style="color:{color};margin-bottom:8px">{group}</h3>', unsafe_allow_html=True)
-            cols = st.columns(len(specs))
-            for col, (label, off) in zip(cols, specs):
-                col.metric(label, fmt(metric(off), off))
+        for group in palette:
+            st.markdown(f'<h3 style="color:{palette[group]}">{group}</h3>',unsafe_allow_html=True)
+            group_specs=[x for x in SPECS if x[0]==group]
+            cols=st.columns(len(group_specs))
+            for col,spec in zip(cols,group_specs):col.metric(spec[1],fmt(metric(spec),spec[2]))
         if not filtered.empty:
-            labels = filtered.iloc[:, 1 if info['ids'] > 1 else 0].fillna('Unknown').astype(str)
-            chart_df = pd.DataFrame({'Entity': labels, 'DB': pd.to_numeric(filtered.iloc[:, info['ids']+13-shift], errors='coerce').fillna(0), 'PQM GRT': pd.to_numeric(filtered.iloc[:, info['ids']+19-shift], errors='coerce').fillna(0), 'FTNR %': pd.to_numeric(filtered.iloc[:, info['ids']+30-shift], errors='coerce')*100})
             st.subheader('Performance comparison')
-            chart_metric = st.selectbox('Compare by', ['DB', 'PQM GRT', 'FTNR %'])
-            ascending = chart_metric == 'FTNR %'
-            top = chart_df.sort_values(chart_metric, ascending=ascending).head(10)
-            fig = px.bar(top, x=chart_metric, y='Entity', orientation='h', color=chart_metric, color_continuous_scale='Tealgrn' if ascending else 'Blues', title=('Lowest 10' if ascending else 'Top 10') + ' · ' + chart_metric)
-            fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=440, margin=dict(l=10,r=10,t=55,b=20), paper_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption('Charts use the selected summary and filters. Lower FTNR is better.')
+            chart_choices=[('DB','Vishwas Pipeline / # DB'),('PQM GRT','Fresh Client GRT / PQM GRT'),('FTNR %','FTNR %')]
+            choice=st.selectbox('Compare by',[x[0] for x in chart_choices])
+            idx=locate(dict(chart_choices)[choice])
+            if idx is not None:
+                entity_col=next((i for i,h in enumerate(info['headers']) if normalize(h) in ('dmname','pqmname','zonalname','regionavpname','branch')),0)
+                plot=pd.DataFrame({'Entity':filtered.iloc[:,entity_col].fillna('Unknown').astype(str).to_numpy(),'Value':pd.to_numeric(filtered.iloc[:,idx],errors='coerce').to_numpy()})
+                plot=plot.dropna(subset=['Value'])
+                if choice=='FTNR %':plot['Value']*=100
+                if not plot.empty:
+                    top=plot.sort_values('Value',ascending=(choice=='FTNR %')).head(10)
+                    fig=px.bar(top,x='Value',y='Entity',orientation='h',color='Value',color_continuous_scale='Blues')
+                    fig.update_layout(height=430,yaxis={'categoryorder':'total ascending'},margin=dict(l=10,r=10,t=20,b=20))
+                    st.plotly_chart(fig,use_container_width=True)
+            else:st.info('Chart metric is not available in this sheet.')
     else:
-        cards = ['<div class="kpi-grid">']
-        for group, specs in groups:
-            for label, off in specs:
-                cards.append(f'<div class="kpi-tile"><div class="kpi-group-label">{escape(group)}</div><div class="kpi-label">{escape(label)}</div><div class="kpi-number">{escape(fmt(metric(off),off))}</div></div>')
+        cards=['<div class="kpi-grid">']
+        for group,label,kind,key in SPECS:
+            cards.append(f'<div class="kpi-tile"><div class="kpi-group-label">{escape(group)}</div><div class="kpi-label">{escape(label)}</div><div class="kpi-number">{escape(fmt(metric((group,label,kind,key)),kind))}</div></div>')
         cards.append('</div>')
-        st.markdown(''.join(cards), unsafe_allow_html=True)
+        st.markdown(''.join(cards),unsafe_allow_html=True)
+    missing_kpis=[spec[1] for spec in SPECS if locate(spec[3]) is None]
+    if missing_kpis:st.warning('These KPIs could not be matched uniquely to Excel headers: '+', '.join(missing_kpis)+'. They are shown as —, not guessed.')
     st.caption(f'{len(filtered):,} branch detail rows · Scroll horizontally to see all metrics.' if branch_detail else f'{len(filtered):,} of {len(df):,} rows · Scroll horizontally to see all metrics.')
     if filtered.empty:
         st.info('No matching rows. Clear the filters.')
