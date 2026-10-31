@@ -10,8 +10,8 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 
 NS = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-SHEETS = {'Zone': ('Zone Summary', 3, 37),
-          'Region(AVP)': ('Region(AVP) Summary', 4, 38),
+SHEETS = {'Zone': ('Zone Summary', 3, 39),
+          'Region(AVP)': ('Region(AVP) Summary', 4, 40),
           'DM': ('DM Summary', 4, 38),
           'PQM': ('PQM Summary', 8, 42)}
 def colnum(ref):
@@ -74,7 +74,7 @@ def load_report(raw):
             for m in root.findall('s:mergeCells/s:mergeCell', NS):
                 a, b = m.attrib['ref'].split(':')
                 r1, c1 = coord(a); r2, c2 = coord(b)
-                if r2 <= 3 and c1 <= width:
+                if r1 <= 3 and c1 <= width:
                     merges.append((r1, c1, r2, min(c2, width)))
             headers = []
             for c in range(1, width + 1):
@@ -114,11 +114,11 @@ def display(value, offset):
         return '—'
     if not isinstance(value, Real):
         return str(value)
-    if offset in (19, 27, 33):
+    if offset in (22, 30, 36, 19, 27, 33):
         return f'{value:.2%}'
     if offset in (4, 7, 11, 18, 23, 28, 29, 30, 31, 32):
         return f'{value:,.2f}'
-    if offset == 24:
+    if offset == 26:
         return f'₹ {value:,.0f}'
     return f'{value:,.0f}'
 
@@ -187,7 +187,7 @@ def main():
     .report th.frozen{z-index:4;background:#133d65}
     .report tr.total td.frozen{background:#d9e8f5}.report tr.total{background:#d9e8f5;font-weight:bold}
     </style>''', unsafe_allow_html=True)
-    st.markdown('<div class="hero"><h1>Welcome to the PQM Dashboard Analyser</h1><p>Upload a Combined PQM Report to view the analysis. No report is loaded automatically.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero"><h1>Welcome to the PQM Dashboard Analyser</h1><p>Explore your performance in visual and detailed table views. Upload your latest report.</p></div>', unsafe_allow_html=True)
 
     upload = st.file_uploader(
         "Upload your Combined PQM Report (.xlsx)",
@@ -265,53 +265,79 @@ def main():
         s = pd.to_numeric(applicable, errors='coerce')
         return s.sum() if len(s) and s.notna().all() else None
     # Counts and amounts are additive; rates are ratios of matching totals.
+    # All offsets are relative to each sheet's identification columns.
+    # The new October report adds two metric columns in Zone/Region.
+    # Metric offsets are consistent across the four summary sheets.
     groups = [
-        ('Vishwas', [('Total Allocated', 0), ('Total Conducted', 1), ('DB', 10), ('DB Amount (Cr)', 11), ('Declined', 12)]),
-        ('GRT', [('PQM GRT', 16), ('GRT % PQM', 19)]),
-        ('Ujala', [('CB to DB', 20), ('DB Amount (Cr)', 24)]),
-        ('FTNR', [('FTNR %', 27)]),
-        ('Time in Minutes', [('Effective Productivity', 33)])]
-    def effective_productivity():
-        if filtered.empty:
-            return None
-        if all_rows and info['total'] is not None:
-            value = info['total'][info['ids']+33]
-            return value if isinstance(value, Real) else None
-        values = pd.to_numeric(filtered.iloc[:, info['ids']+33], errors='coerce')
-        if len(filtered) == 1:
-            return values.iloc[0] if values.notna().all() else None
-        if info['name'] == 'PQM Summary':
-            # Each populated employee row is one PQM; exclude unassigned rows.
-            weights = filtered['PQM EMP ID'].fillna('').astype(str).str.strip().map(lambda x: 1 if x and x != '-' else 0)
-        else:
-            count_col = next(c for c in filtered.columns if c.lower().startswith('no') and 'pqm' in c.lower())
-            weights = pd.to_numeric(filtered[count_col], errors='coerce').fillna(0)
-        valid = weights > 0
-        if not valid.any() or values[valid].isna().any():
-            return None
-        return (values[valid] * weights[valid]).sum() / weights[valid].sum()
-    cards = ['<div class="kpi-grid">']
-    for group, specs in groups:
-        for label, off in specs:
-            value = effective_productivity() if off == 33 else sum_col(off)
-            if off in (19, 27):
-                numerator, denominator = (sum_col(16), sum_col(17)) if off == 19 else (sum_col(25), sum_col(26))
-                value = numerator / denominator if numerator is not None and denominator else None
-            if value is None:
-                formatted = '—'
-            elif off == 24:
-                formatted = f'₹ {value / 10000000:,.2f} Cr'
-            elif off == 11:
-                formatted = f'₹ {value:,.2f} Cr'
+        ('Vishwas', [('Total Allocated', 0), ('PD Conducted', 1), ('DB', 13), ('DB Amount (Cr)', 14), ('Declined', 15)]),
+        ('GRT', [('PQM GRT', 19), ('GRT % PQM', 22)]),
+        ('Ujala', [('CB to DB', 23), ('DB Amount', 27)]),
+        ('FTNR', [('FTNR %', 30)]),
+        ('Productivity', [('Effective Productivity', 36)])]
+    shift = 3 if level in ('DM', 'PQM') else 0
+    groups = [(g, [(label, off-shift) for label, off in specs]) for g, specs in groups]
+    # In the DM and PQM sheets the identifiers occupy 4 and 8 columns,
+    # and the metrics above still use the same relative offsets.
+    def metric(offset):
+        grt_off, grt_total_off, ftnr_off, ftnr_total_off, prod_off = (22-shift, 20-shift, 30-shift, 29-shift, 36-shift)
+        if offset == grt_off:
+            a, b = sum_col(19-shift), sum_col(grt_total_off)
+            return a / b if a is not None and b else None
+        if offset == ftnr_off:
+            a, b = sum_col(28-shift), sum_col(ftnr_total_off)
+            return a / b if a is not None and b else None
+        if offset == prod_off:
+            if all_rows and info['total'] is not None:
+                v = info['total'][info['ids'] + offset]
+                return v if isinstance(v, Real) else None
+            vals = pd.to_numeric(filtered.iloc[:, info['ids'] + offset], errors='coerce')
+            if len(vals) == 1:
+                return vals.iloc[0]
+            if info['name'] == 'PQM Summary':
+                weights = filtered.iloc[:, 6].fillna('').astype(str).str.strip().map(lambda x: int(bool(x and x != '-')))
             else:
-                formatted = display(value, off)
-            cards.append(f'<div class="kpi-tile"><div class="kpi-group-label">{escape(group)}</div><div class="kpi-label">{escape(label)}</div><div class="kpi-number">{escape(formatted)}</div></div>')
-    cards.append('</div>')
-    st.markdown(''.join(cards), unsafe_allow_html=True)
+                weights = pd.to_numeric(filtered.iloc[:, info['ids']-2], errors='coerce').fillna(0)
+            valid = (weights > 0) & vals.notna()
+            return (vals[valid] * weights[valid]).sum() / weights[valid].sum() if valid.any() else None
+        return sum_col(offset)
+    def fmt(v, off):
+        if v is None or pd.isna(v): return '—'
+        if off in (22-shift,30-shift,36-shift): return f'{v:.1%}'
+        if off == 14-shift: return f'₹{v:,.2f} Cr'
+        if off == 27-shift: return f'₹{v/1e7:,.2f} Cr'
+        return f'{v:,.0f}'
+    view = st.radio('Display mode', ['📊 Visual Dashboard', '📋 Table View'], horizontal=True)
+    colors = ['#0ea5e9','#8b5cf6','#f59e0b','#10b981','#ec4899']
+    if view == '📊 Visual Dashboard':
+        import plotly.express as px
+        st.markdown('<style>.stApp{background:linear-gradient(135deg,#f0f7ff,#faf5ff)}[data-testid="stMetric"]{background:white;border:1px solid #dbeafe;border-radius:14px;padding:16px;box-shadow:0 4px 15px #dbeafe70}</style>', unsafe_allow_html=True)
+        for (group, specs), color in zip(groups, colors):
+            st.markdown(f'<h3 style="color:{color};margin-bottom:8px">{group}</h3>', unsafe_allow_html=True)
+            cols = st.columns(len(specs))
+            for col, (label, off) in zip(cols, specs):
+                col.metric(label, fmt(metric(off), off))
+        if not filtered.empty:
+            labels = filtered.iloc[:, 1 if info['ids'] > 1 else 0].fillna('Unknown').astype(str)
+            chart_df = pd.DataFrame({'Entity': labels, 'DB': pd.to_numeric(filtered.iloc[:, info['ids']+13-shift], errors='coerce').fillna(0), 'PQM GRT': pd.to_numeric(filtered.iloc[:, info['ids']+19-shift], errors='coerce').fillna(0), 'FTNR %': pd.to_numeric(filtered.iloc[:, info['ids']+30-shift], errors='coerce')*100})
+            st.subheader('Performance comparison')
+            chart_metric = st.selectbox('Compare by', ['DB', 'PQM GRT', 'FTNR %'])
+            ascending = chart_metric == 'FTNR %'
+            top = chart_df.sort_values(chart_metric, ascending=ascending).head(10)
+            fig = px.bar(top, x=chart_metric, y='Entity', orientation='h', color=chart_metric, color_continuous_scale='Tealgrn' if ascending else 'Blues', title=('Lowest 10' if ascending else 'Top 10') + ' · ' + chart_metric)
+            fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=440, margin=dict(l=10,r=10,t=55,b=20), paper_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption('Charts use the selected summary and filters. Lower FTNR is better.')
+    else:
+        cards = ['<div class="kpi-grid">']
+        for group, specs in groups:
+            for label, off in specs:
+                cards.append(f'<div class="kpi-tile"><div class="kpi-group-label">{escape(group)}</div><div class="kpi-label">{escape(label)}</div><div class="kpi-number">{escape(fmt(metric(off),off))}</div></div>')
+        cards.append('</div>')
+        st.markdown(''.join(cards), unsafe_allow_html=True)
     st.caption(f'{len(filtered):,} branch detail rows · Scroll horizontally to see all metrics.' if branch_detail else f'{len(filtered):,} of {len(df):,} rows · Scroll horizontally to see all metrics.')
     if filtered.empty:
         st.info('No matching rows. Clear the filters.')
-    else:
+    elif view == '📋 Table View':
         st.markdown(render_table(info, filtered.values.tolist(), info['total'] if all_rows else None), unsafe_allow_html=True)
     st.caption('Figures come directly from the selected Excel summary. The Excel total is shown only for the full view. Filtered percentages are not averaged.')
 
