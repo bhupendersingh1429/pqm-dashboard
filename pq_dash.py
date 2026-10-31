@@ -114,96 +114,119 @@ def load_report(raw):
     return result
 
 
+def norm(value):
+    return re.sub(r'[^a-z0-9]+', '', str(value).casefold())
+
+
+def indian(value, decimals=0):
+    negative = '-' if value < 0 else ''
+    digits = f'{abs(value):.{decimals}f}'
+    whole, dot, fraction = digits.partition('.')
+    if len(whole) > 3:
+        head, tail = whole[:-3], whole[-3:]
+        groups = []
+        while head:
+            groups.insert(0, head[-2:])
+            head = head[:-2]
+        whole = ','.join(groups + [tail])
+    return negative + whole + (dot + fraction if dot else '')
+
+
 def display(value, header):
-    if value is None: return '—'
-    if not isinstance(value, Real): return str(value)
-    h = str(header).lower()
-    if 'ftnr %' in h or 'grt(%)' in h:
+    if value is None or (isinstance(value, str) and value.strip() in ('-', '—', '')):
+        return '—'
+    if not isinstance(value, Real):
+        return str(value)
+    h = norm(header)
+    if 'ftnr' in h and ('ftnr' == h[-4:] or 'ftnrpercent' in h):
         return f'{value:.2%}'
-    if 'productivity' in h or 'time in minutes' in h or 'amount(cr)' in h:
-        return f'{value:,.2f}'
-    return f'{value:,.0f}'
+    if 'grt' in h and ('grtpercent' in h or 'grt(%)' in str(header).lower() or ('%' in str(header) and h.endswith('grtpqm'))):
+        return f'{value:.2%}'
+    if 'dbamount' in h and 'cr' not in h:
+        return '₹' + indian(value)
+    if 'amountcr' in h:
+        return '₹' + indian(value, 2) + ' Cr'
+    if 'productivity' in h or 'timeinminutes' in h:
+        return indian(value, 2)
+    return indian(value)
 
 
 def render_table(info, rows, total=None):
-    """Excel-style three-tier headers and conditional performance heatmap."""
+    """Dynamic table: remove empty trailing/helper columns, preserve 3-row merged headers."""
     from math import isfinite
+    headers, ids = info['headers'], info['ids']
     width = info['width']
-    headers = info['headers']
-    ids = info['ids']
-    def norm(x): return re.sub(r'[^a-z0-9]+', '', str(x).lower())
-    grt_cols = [i for i,h in enumerate(headers) if 'freshclientgrt' in norm(h) and 'grt' in norm(h) and ('grt%' in h.lower() or 'grt(%)' in h.lower())]
-    ftnr_cols = [i for i,h in enumerate(headers) if 'ftnr' in norm(h) and 'ftnr%' in h.lower()]
-    amount_cols = [i for i,h in enumerate(headers) if i>=ids and ('db amount' in h.lower() or 'dbamount' in norm(h))]
     def numeric(x):
         try:
-            if x is None or str(x).strip() in ('','-','—'): return None
-            v=float(x)
+            if x is None or str(x).strip() in ('', '-', '—'): return None
+            v = float(x)
             return v if isfinite(v) else None
-        except (TypeError,ValueError):return None
-    extrema={}
-    for col in grt_cols+ftnr_cols+amount_cols:
-        nums=[numeric(r[col]) for r in rows]
-        nums=[x for x in nums if x is not None]
-        if nums: extrema[col]=(min(nums),max(nums))
-    def heat(value,col):
-        v=numeric(value)
-        if v is None or col not in extrema:return ''
-        low,high=extrema[col]
-        t=(v-low)/(high-low) if high>low else 1.0
-        if col in ftnr_cols:t=1-t
-        # Red -> amber -> light green -> deep green; text remains readable.
-        if t>=.80: return 'background:#15803d;color:#fff;font-weight:800;'
-        if t>=.60: return 'background:#bbf7d0;color:#14532d;font-weight:700;'
-        if t>=.40: return 'background:#fef08a;color:#713f12;font-weight:700;'
-        if t>=.20: return 'background:#fed7aa;color:#9a3412;font-weight:700;'
+        except (ValueError, TypeError): return None
+    # Drop empty columns only when both the visible data AND grand total are empty.
+    visible = [c for c in range(width) if c < ids or any(numeric(r[c]) is not None or
+                (isinstance(r[c], str) and r[c].strip() not in ('', '-', '—')) for r in rows)
+                or (total is not None and (numeric(total[c]) is not None or
+                (isinstance(total[c], str) and total[c].strip() not in ('', '-', '—'))))]
+    if not visible: return '<p>No data available.</p>'
+    # A merged header cannot be represented as a noncontiguous span; show the
+    # full header path in one sticky header row after empty columns are removed.
+    def section(c):
+        h = norm(headers[c])
+        if c < ids: return 'identity'
+        if 'ftnr' in h: return 'ftnr'
+        if 'ujala' in h: return 'ujala'
+        if 'freshclientgrt' in h: return 'grt'
+        if 'productivity' in h or 'timeinminutes' in h: return 'productivity'
+        if 'vishwas' in h or 'allocated' in h or 'pdconducted' in h: return 'vishwas'
+        return 'other'
+    palette = {'identity':'#243b60','vishwas':'#0369a1','grt':'#6d28d9',
+               'ujala':'#c2410c','ftnr':'#047857','productivity':'#be185d','other':'#334155'}
+    grt = [c for c in visible if 'freshclientgrt' in norm(headers[c]) and
+           ('grt%' in headers[c].lower() or 'grt(%)' in headers[c].lower())]
+    ftnr = [c for c in visible if section(c)=='ftnr' and 'ftnr%' in headers[c].lower()]
+    amounts = [c for c in visible if c >= ids and 'dbamount' in norm(headers[c])]
+    extrema = {}
+    for c in set(grt + ftnr + amounts):
+        vals = [numeric(r[c]) for r in rows]
+        vals = [v for v in vals if v is not None]
+        if vals: extrema[c] = (min(vals), max(vals))
+    def heat(v,c):
+        n=numeric(v)
+        if n is None or c not in extrema:return ''
+        lo,hi=extrema[c]
+        t=(n-lo)/(hi-lo) if hi>lo else 1.0
+        if c in ftnr:t=1-t
+        if t>=.8:return 'background:#15803d;color:white;font-weight:800;'
+        if t>=.6:return 'background:#bbf7d0;color:#14532d;font-weight:700;'
+        if t>=.4:return 'background:#fef08a;color:#713f12;font-weight:700;'
+        if t>=.2:return 'background:#fed7aa;color:#9a3412;font-weight:700;'
         return 'background:#fecaca;color:#991b1b;font-weight:700;'
-    def group_color(c):
-        h=str(headers[c-1]).lower()
-        if c<=ids:return '#243b60'
-        if 'vishwas' in h or 'allocated' in h or 'pd conducted' in h:return '#0369a1'
-        if 'fresh client grt' in h:return '#6d28d9'
-        if 'ujala' in h:return '#c2410c'
-        if 'ftnr' in h:return '#047857'
-        if 'time in minutes' in h or 'productivity' in h:return '#be185d'
-        return '#334155'
-    frozen = [1] if ids<2 else [1,2]
-    if info['name']=='PQM Summary':frozen=[6,8]  # PQM Name + Branch
+    # First two identification columns remain visible while scrolling.
+    frozen = visible[:min(2,ids)]
+    if info['name']=='PQM Summary':
+        frozen = [c for c in visible if norm(headers[c]) in ('pqmname','branch')][:2] or frozen
     def pin(c):
         if c not in frozen:return ''
-        left=frozen.index(c)*165
-        return f'position:sticky;left:{left}px;min-width:165px;max-width:165px;z-index:3;'
-    covered=set();origins={}
-    for r1,c1,r2,c2 in info['merges']:
-        if c1>width:continue
-        r2=min(r2,3);c2=min(c2,width)
-        origins[r1,c1]=(r2-r1+1,c2-c1+1)
-        covered.update((r,c) for r in range(r1,r2+1) for c in range(c1,c2+1) if (r,c)!=(r1,c1))
-    out=['<div class="report-scroll"><table class="report"><thead>']
-    for r in range(1,4):
+        return f'position:sticky;left:{frozen.index(c)*155}px;min-width:155px;max-width:155px;z-index:3;'
+    out=['<div class="report-scroll"><table class="report"><thead><tr>']
+    for c in visible:
+        # nearest header on identity columns; otherwise full multi-tier metric path
+        h=escape(str(headers[c] or f'Column {c+1}'))
+        out.append(f'<th style="background:{palette[section(c)]};{pin(c)}">{h}</th>')
+    out.append('</tr></thead><tbody>')
+    for ri,row in enumerate(rows):
         out.append('<tr>')
-        for c in range(1,width+1):
-            if (r,c) in covered:continue
-            rs,cs=origins.get((r,c),(1,1))
-            value=escape(str(info['cells'].get((r,c),'') or '')).replace('\n','<br>')
-            style=f'background:{group_color(c)};{pin(c)}'
-            out.append(f'<th rowspan="{rs}" colspan="{cs}" style="{style}">{value}</th>')
-        out.append('</tr>')
-    out.append('</thead><tbody>')
-    for ri,values in enumerate(rows):
-        out.append('<tr>')
-        for c,v in enumerate(values):
-            is_label=c<ids
-            content=escape(str(v) if v is not None else '') if is_label else escape(display(v,headers[c]))
-            bg='#fff' if ri%2==0 else '#f1f6fd'
-            style=(f'background:{bg};'+pin(c+1)) if c+1 in frozen else heat(v,c)
-            out.append(f'<td class="{"label" if is_label else "number"}" style="{style}">{content}</td>')
+        for c in visible:
+            value = escape(str(row[c]) if row[c] is not None else '—') if c<ids else escape(display(row[c],headers[c]))
+            bg = '#ffffff' if ri%2==0 else '#f0f5fc'
+            style = f'background:{bg};'+pin(c) if c in frozen else heat(row[c],c)
+            out.append(f'<td class="{"label" if c<ids else "number"}" style="{style}">{value}</td>')
         out.append('</tr>')
     if total is not None:
         out.append('<tr class="total">')
-        for c,v in enumerate(total):
-            content=escape(str(v) if v is not None else '') if c<ids else escape(display(v,headers[c]))
-            out.append(f'<td style="background:#172f53;color:white;font-weight:800;{pin(c+1)}">{content}</td>')
+        for c in visible:
+            value=escape(str(total[c]) if total[c] is not None else '—') if c<ids else escape(display(total[c],headers[c]))
+            out.append(f'<td style="background:#172f53;color:white;font-weight:800;{pin(c)}">{value}</td>')
         out.append('</tr>')
     out.append('</tbody></table></div>')
     return ''.join(out)
@@ -224,6 +247,12 @@ def main():
 
     .hero h1{margin:0;font-size:30px}.hero p{margin:6px 0 0;color:#deedf4}
     .report-scroll{overflow:auto;max-height:670px;border:1px solid #d7e0eb;border-radius:10px;background:white}
+    .progress-panel{background:white;border:1px solid #dbeafe;border-radius:18px;padding:26px;margin-top:14px;box-shadow:0 7px 22px #22386010}
+    .progress-line{display:flex;justify-content:space-between;gap:12px;font-size:14px;margin:16px 0 8px;color:#334155}
+    .progress-track{height:18px;border-radius:30px;background:#e2e8f0;overflow:hidden}
+    .progress-fill{height:100%;border-radius:30px}
+    .conversion-footer{margin-top:24px;padding-top:16px;border-top:1px solid #e2e8f0;color:#475569}
+    .conversion-footer strong{color:#059669;font-size:22px;margin-left:8px}
     .report{border-collapse:separate;border-spacing:0;font:12px Arial;min-width:100%}
     .report th{background:#133d65;color:white;min-width:95px;padding:11px 9px;border-right:1px solid #4b6984;border-bottom:1px solid #4b6984;text-align:center}
     .report thead{position:sticky;top:0;z-index:2}.report td{padding:9px 12px;border-right:1px solid #e0e6ef;border-bottom:1px solid #e0e6ef;white-space:nowrap;text-align:right}
@@ -438,56 +467,101 @@ def main():
             sections.append('</div>')
             st.markdown(''.join(sections),unsafe_allow_html=True)
         st.markdown('### Performance analytics')
-        def plot_data(key,rate=False,ascending=False,limit=10):
-            idx=locate(key)
-            if idx is None or filtered.empty:return None
-            entity_col=next((i for i,h in enumerate(info['headers'][:info['ids']]) if normalize(h) in ('dmname','pqmname','zonalname','regionavpname','branch')),0)
-            frame=pd.DataFrame({'Name':filtered.iloc[:,entity_col].fillna('Unknown').astype(str).to_numpy(),
-                'Value':pd.to_numeric(filtered.iloc[:,idx],errors='coerce').to_numpy()})
-            frame=frame.dropna(subset=['Value'])
-            frame=frame[frame['Name'].str.strip().ne('')]
-            if rate:frame['Value']=frame['Value']*100
-            if frame.empty:return None
-            return frame.sort_values('Value',ascending=ascending).head(limit)
+        def chart_frame(key):
+            """At DM/RM selection drill down to PQM Summary branches, not repeated DM labels."""
+            source = filtered
+            source_info = info
+            selected_dm = entity_filters.get('DM Name', [])
+            selected_rm = entity_filters.get('RM', []) or entity_filters.get('RM Name', [])
+            if level in ('Zone','Region(AVP)','DM') and (selected_dm or selected_rm or branch_detail):
+                source_info = reports['PQM']
+                source = pd.DataFrame(source_info['rows'],columns=range(source_info['width']))
+                for field, chosen in entity_filters.items():
+                    alias = {'RM':'RM Name','Region AVP':'Region AVP'}.get(field,field)
+                    candidates=[i for i,h in enumerate(source_info['headers']) if norm(h)==norm(alias)]
+                    if candidates and chosen:
+                        source=source[source.iloc[:,candidates[0]].fillna('').astype(str).isin(chosen)]
+                if selected_branches:
+                    branch_idx=next((i for i,h in enumerate(source_info['headers']) if norm(h)=='branch'),None)
+                    if branch_idx is not None:source=source[source.iloc[:,branch_idx].astype(str).isin(selected_branches)]
+            metric_hits=[i for i,h in enumerate(source_info['headers']) if norm(h).endswith(norm(key))]
+            if len(metric_hits)!=1:
+                if key=='Vishwas Pipeline / # DB':
+                    metric_hits=[i for i,h in enumerate(source_info['headers']) if norm(h).startswith('vishwaspipeline') and norm(h).endswith('db')]
+            if len(metric_hits)!=1:return None
+            # Use branch labels when drilling into DM, otherwise appropriate entity.
+            preferred = (['Branch'] if source_info['name']=='PQM Summary' else
+                         ['DM Name','Region AVP Name','Zonal Name','Zone'])
+            name_idx=next((i for name in preferred for i,h in enumerate(source_info['headers'][:source_info['ids']]) if norm(h)==norm(name)),0)
+            if isinstance(source.columns[0],int):
+                names=source.iloc[:,name_idx]
+                values=source.iloc[:,metric_hits[0]]
+            else:
+                names=source.iloc[:,name_idx]
+                values=source.iloc[:,metric_hits[0]]
+            data=pd.DataFrame({'Name':names.astype(str).str.strip().to_numpy(),
+                               'Value':pd.to_numeric(values,errors='coerce').to_numpy()})
+            data=data[(data.Name!='') & (data.Name!='-')].dropna(subset=['Value'])
+            if data.empty:return None
+            return data.groupby('Name',as_index=False)['Value'].sum().sort_values('Value',ascending=False).head(10)
+
+        def ranked_chart(column,key,heading,colors):
+            with column:
+                st.markdown('**'+heading+'**')
+                data=chart_frame(key)
+                if data is None or data.empty:
+                    st.info('Chart data unavailable for this selection.')
+                    return
+                data=data.sort_values('Value',ascending=True)
+                fig=px.bar(data,x='Value',y='Name',orientation='h',color='Value',
+                           color_continuous_scale=colors,text='Value',
+                           hover_data={'Name':True,'Value':':,.0f'})
+                vmax=max(float(data.Value.max()),1)
+                fig.update_xaxes(range=[0,vmax*1.28],showgrid=True,gridcolor='#e7eaf2',title=None)
+                fig.update_yaxes(title=None,automargin=True)
+                fig.update_traces(texttemplate='%{x:,.0f}',textposition='outside',cliponaxis=False)
+                fig.update_layout(height=max(360,55*len(data)+100),coloraxis_showscale=False,
+                                  margin=dict(l=15,r=80,t=18,b=20),
+                                  paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+                                  font=dict(size=12,color='#334155'),showlegend=False)
+                st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+        left,right=st.columns(2,gap='large')
+        ranked_chart(left,'Vishwas Pipeline / # DB','Top 10 · Disbursement Count',['#bae6fd','#0284c7','#075985'])
+        ranked_chart(right,'Fresh Client GRT / PQM GRT','Top 10 · PQM GRT',['#ddd6fe','#8b5cf6','#5b21b6'])
         left,right=st.columns(2,gap='large')
         with left:
-            st.markdown('**Top 10 · Disbursement**')
-            data=plot_data('Vishwas Pipeline / # DB')
-            if data is not None:
-                fig=px.bar(data,x='Value',y='Name',orientation='h',color='Value',color_continuous_scale=['#bae6fd','#0284c7','#075985'],text='Value')
-                fig.update_layout(height=390,coloraxis_showscale=False,yaxis={'categoryorder':'total ascending'},margin=dict(l=0,r=12,t=8,b=10),paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)')
-                fig.update_traces(textposition='outside')
-                st.plotly_chart(fig,use_container_width=True)
-            else:st.info('Disbursement chart not available.')
+            st.markdown('**PQM GRT Performance · Speedometer**')
+            grt_rate=metric(next(sp for sp in SPECS if sp[2]=='grt_rate'))
+            if grt_rate is None:
+                st.info('PQM GRT % unavailable.')
+            else:
+                pct=grt_rate*100
+                fig=go.Figure(go.Indicator(mode='gauge+number',value=pct,
+                    number={'suffix':'%','valueformat':'.2f','font':{'size':37,'color':'#172b4d'}},
+                    gauge={'axis':{'range':[0,100],'tickwidth':1},'bar':{'color':'#7c3aed','thickness':.32},
+                           'bgcolor':'#e2e8f0','steps':[{'range':[0,40],'color':'#fee2e2'},
+                            {'range':[40,70],'color':'#fef3c7'},{'range':[70,100],'color':'#dcfce7'}]}))
+                fig.update_layout(height=310,margin=dict(l=20,r=20,t=45,b=20),paper_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+                if pct>100:st.caption('Actual value exceeds the 100% gauge maximum.')
         with right:
-            st.markdown('**Top 10 · PQM GRT**')
-            data=plot_data('Fresh Client GRT / PQM GRT')
-            if data is not None:
-                fig=px.bar(data,x='Value',y='Name',orientation='h',color='Value',color_continuous_scale=['#ddd6fe','#8b5cf6','#5b21b6'],text='Value')
-                fig.update_layout(height=390,coloraxis_showscale=False,yaxis={'categoryorder':'total ascending'},margin=dict(l=0,r=12,t=8,b=10),paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)')
-                fig.update_traces(textposition='outside')
-                st.plotly_chart(fig,use_container_width=True)
-            else:st.info('GRT chart not available.')
-        left,right=st.columns(2,gap='large')
-        with left:
-            st.markdown('**GRT mix · PQM vs Branch**')
-            pqm=aggregate(locate('Fresh Client GRT / PQM GRT'))
-            branch=aggregate(locate('Fresh Client GRT / Branch GRT'))
-            if pqm is not None and branch is not None and pqm+branch>0:
-                fig=go.Figure(go.Pie(labels=['PQM GRT','Branch GRT'],values=[pqm,branch],hole=.67,marker_colors=['#7c3aed','#38bdf8'],textinfo='percent+label'))
-                fig.update_layout(height=340,margin=dict(l=10,r=10,t=10,b=10),showlegend=False,paper_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig,use_container_width=True)
-            else:st.info('GRT mix is unavailable.')
-        with right:
-            st.markdown('**Disbursement conversion**')
+            st.markdown('**Disbursement Performance · Progress Comparison**')
             allocated=aggregate(locate('#Total Allocated'))
             conducted=aggregate(locate('# Total PD Conducted'))
             disbursed=aggregate(locate('Vishwas Pipeline / # DB'))
-            if all(v is not None for v in [allocated,conducted,disbursed]):
-                fig=go.Figure(go.Bar(x=['Allocated','PD Conducted','DB'],y=[allocated,conducted,disbursed],marker_color=['#38bdf8','#8b5cf6','#10b981'],text=[f'{v:,.0f}' for v in [allocated,conducted,disbursed]],textposition='outside'))
-                fig.update_layout(height=340,margin=dict(l=10,r=10,t=10,b=10),yaxis_title='Cases',paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig,use_container_width=True)
-            else:st.info('Conversion chart is unavailable.')
+            if all(v is not None for v in (allocated,conducted,disbursed)):
+                values=[allocated,conducted,disbursed]
+                maximum=max(max(values),1)
+                labels=['Allocated','PD Conducted','Disbursed']
+                colors=['#38bdf8','#8b5cf6','#10b981']
+                html=['<div class="progress-panel">']
+                for label,value,color in zip(labels,values,colors):
+                    html.append(f'<div class="progress-line"><span>{escape(label)}</span><strong>{indian(value)}</strong></div>')
+                    html.append(f'<div class="progress-track"><div class="progress-fill" style="width:{max(0,min(100,value/maximum*100)):.2f}%;background:{color}"></div></div>')
+                rate=100*disbursed/conducted if conducted else None
+                html.append('<div class="conversion-footer">PD to DB Conversion: <strong>'+ (f'{rate:.1f}%' if rate is not None else '—') +'</strong></div></div>')
+                st.markdown(''.join(html),unsafe_allow_html=True)
+            else:st.info('Conversion data unavailable.')
     else:
         st.caption('🟢 Green = stronger performance · 🟡 Yellow = middle · 🔴 Red = needs attention. GRT: higher is better; FTNR: lower is better. Colours are relative to filtered rows.')
         cards=['<div class="kpi-grid">']
