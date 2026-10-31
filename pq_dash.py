@@ -138,7 +138,7 @@ def display(value, header):
     if not isinstance(value, Real):
         return str(value)
     h = norm(header)
-    if 'ftnr' in h and ('ftnr' == h[-4:] or 'ftnrpercent' in h):
+    if h.startswith('ftnr') and ('ftnr%' in str(header).lower() or h.endswith('ftnr')):
         return f'{value:.2%}'
     if 'grt' in h and ('grtpercent' in h or 'grt(%)' in str(header).lower() or ('%' in str(header) and h.endswith('grtpqm'))):
         return f'{value:.2%}'
@@ -146,6 +146,8 @@ def display(value, header):
         return '₹' + indian(value)
     if 'amountcr' in h:
         return '₹' + indian(value, 2) + ' Cr'
+    if 'effectiveproductivity' in h or 'effproductivity' in h:
+        return f'{value:.2%}'
     if 'productivity' in h or 'timeinminutes' in h:
         return indian(value, 2)
     return indian(value)
@@ -173,8 +175,8 @@ def render_table(info, rows, total=None):
     def section(c):
         h = norm(headers[c])
         if c < ids: return 'identity'
-        if 'ftnr' in h: return 'ftnr'
-        if 'ujala' in h: return 'ujala'
+        if h.startswith('ftnr'): return 'ftnr'
+        if h.startswith('ujala'): return 'ujala'
         if 'freshclientgrt' in h: return 'grt'
         if 'productivity' in h or 'timeinminutes' in h: return 'productivity'
         if 'vishwas' in h or 'allocated' in h or 'pdconducted' in h: return 'vishwas'
@@ -208,12 +210,39 @@ def render_table(info, rows, total=None):
     def pin(c):
         if c not in frozen:return ''
         return f'position:sticky;left:{frozen.index(c)*155}px;min-width:155px;max-width:155px;z-index:3;'
-    out=['<div class="report-scroll"><table class="report"><thead><tr>']
-    for c in visible:
-        # nearest header on identity columns; otherwise full multi-tier metric path
-        h=escape(str(headers[c] or f'Column {c+1}'))
-        out.append(f'<th style="background:{palette[section(c)]};{pin(c)}">{h}</th>')
-    out.append('</tr></thead><tbody>')
+    # Reconstruct merged header rows after removing blank columns. Each span counts
+    # only retained columns, so filtered-out helpers never shift the heading.
+    merged = {}
+    for r1,c1,r2,c2 in info['merges']:
+        for rr in range(r1,r2+1):
+            for cc in range(c1,c2+1):
+                merged[rr,cc]=(r1,c1,r2,c2)
+    out=['<div class="report-scroll"><table class="report"><thead>']
+    occupied=set()
+    for rr in range(1,4):
+        out.append('<tr>')
+        for c in visible:
+            if (rr,c) in occupied:continue
+            orig=merged.get((rr,c+1))
+            if orig:
+                r1,c1,r2,c2=orig
+                cols=[v for v in visible if c1<=v+1<=c2]
+                if not cols:continue
+                if rr!=r1 or c!=cols[0]:continue
+                span=len(cols);rowspan=r2-r1+1
+            else:
+                span=rowspan=1
+                cols=[c]
+            for rrr in range(rr,rr+rowspan):
+                for cc in cols:occupied.add((rrr,cc))
+            value=info['cells'].get((rr,c+1),'')
+            label=escape(str(value if value is not None else '')).replace('\n','<br>')
+            group=section(c)
+            style=f'background:{palette[group]};min-width:120px;max-width:190px;white-space:normal;overflow-wrap:break-word;'
+            if c in frozen:style+=pin(c)+'z-index:8;'
+            out.append(f'<th rowspan="{rowspan}" colspan="{span}" style="{style}">{label}</th>')
+        out.append('</tr>')
+    out.append('</thead><tbody>')
     for ri,row in enumerate(rows):
         out.append('<tr>')
         for c in visible:
@@ -245,16 +274,16 @@ def main():
     @media(max-width:900px){.kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
     @media(max-width:480px){.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
-    .hero h1{margin:0;font-size:30px}.hero p{margin:6px 0 0;color:#deedf4}
+    .compact-report-heading{display:flex;align-items:center;gap:22px;flex-wrap:wrap;margin:7px 0 10px;color:#64748b;font-size:13px}.compact-report-heading strong{font-size:24px;color:#172b4d} .hero h1{margin:0;font-size:30px}.hero p{margin:6px 0 0;color:#deedf4}
     .report-scroll{overflow:auto;max-height:670px;border:1px solid #d7e0eb;border-radius:10px;background:white}
-    .progress-panel{background:white;border:1px solid #dbeafe;border-radius:18px;padding:26px;margin-top:14px;box-shadow:0 7px 22px #22386010}
+    .gauge-card{background:white;border:1px solid #dbeafe;border-radius:18px;padding:10px 14px;box-shadow:0 7px 22px #22386010} .progress-panel{background:white;border:1px solid #dbeafe;border-radius:18px;padding:26px;margin-top:14px;box-shadow:0 7px 22px #22386010}
     .progress-line{display:flex;justify-content:space-between;gap:12px;font-size:14px;margin:16px 0 8px;color:#334155}
     .progress-track{height:18px;border-radius:30px;background:#e2e8f0;overflow:hidden}
     .progress-fill{height:100%;border-radius:30px}
     .conversion-footer{margin-top:24px;padding-top:16px;border-top:1px solid #e2e8f0;color:#475569}
     .conversion-footer strong{color:#059669;font-size:22px;margin-left:8px}
     .report{border-collapse:separate;border-spacing:0;font:12px Arial;min-width:100%}
-    .report th{background:#133d65;color:white;min-width:95px;padding:11px 9px;border-right:1px solid #4b6984;border-bottom:1px solid #4b6984;text-align:center}
+    .report th{background:#133d65;color:white;min-width:120px;padding:11px 9px;border-right:1px solid #4b6984;border-bottom:1px solid #4b6984;text-align:center}
     .report thead{position:sticky;top:0;z-index:2}.report td{padding:9px 12px;border-right:1px solid #e0e6ef;border-bottom:1px solid #e0e6ef;white-space:nowrap;text-align:right}
     .report td.label{text-align:left}.report tbody tr:nth-child(even){background:#f0f5fa}
     .report tbody tr:hover{outline:2px solid #60a5fa;outline-offset:-2px}
@@ -289,9 +318,7 @@ def main():
     st.sidebar.title("Report controls")
     level = st.sidebar.selectbox("Summary", list(SHEETS))
     info = reports[level]
-    st.subheader(info['name'])
-    st.caption(info['date'])
-    st.caption(f"Analysis of uploaded file: {escape(upload.name)}")
+    st.markdown(f"""<div class='compact-report-heading'><strong>{escape(info['name'])}</strong><span>📅 {escape(info['date'])}</span><span>📄 {escape(upload.name)}</span></div>""", unsafe_allow_html=True)
 
     if info['missing']:
         st.error('Some formula results are missing. Open the workbook in Excel, recalculate, save, and upload again.')
@@ -327,7 +354,7 @@ def main():
             info = pq_info
             filtered = (branch_rows[branch_rows['Branch'].fillna('').astype(str).isin(selected_branches)] if selected_branches else branch_rows).copy()
             branch_detail = True
-            st.caption('PQ branch performance for the selected filters · Source: PQM Summary.')
+            st.caption('PQ Branch Performance · Source: PQM Summary')
     all_rows = not branch_detail and len(filtered) == len(df)
     def sum_col(offset):
         if filtered.empty:
@@ -414,7 +441,7 @@ def main():
     def fmt(v,kind):
         if v is None or pd.isna(v):return '—'
         if kind in ('grt_rate','ftnr_rate'):return f'{v:.2%}'
-        if kind=='weighted_rate':return f'{v:,.2f}'
+        if kind=='weighted_rate':return f'{v:.2%}'
         if kind=='crore':return f'₹{v:,.2f} Cr'
         if kind=='rupees':return f'₹{v/1e7:,.2f} Cr'
         return f'{v:,.0f}'
@@ -536,13 +563,22 @@ def main():
                 st.info('PQM GRT % unavailable.')
             else:
                 pct=grt_rate*100
-                fig=go.Figure(go.Indicator(mode='gauge+number',value=pct,
-                    number={'suffix':'%','valueformat':'.2f','font':{'size':37,'color':'#172b4d'}},
-                    gauge={'axis':{'range':[0,100],'tickwidth':1},'bar':{'color':'#7c3aed','thickness':.32},
-                           'bgcolor':'#e2e8f0','steps':[{'range':[0,40],'color':'#fee2e2'},
-                            {'range':[40,70],'color':'#fef3c7'},{'range':[70,100],'color':'#dcfce7'}]}))
-                fig.update_layout(height=310,margin=dict(l=20,r=20,t=45,b=20),paper_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
+                from math import pi, cos, sin
+                # SVG semi-circle: compact, responsive and accurately scaled 0–100.
+                cx,cy,r=200,174,122
+                arc_length=pi*r
+                progress=max(0,min(100,pct))
+                svg=f"""<div class='gauge-card'><svg viewBox='0 0 400 228' width='100%' style='max-height:230px'>
+                <defs><linearGradient id='pqmArc' x1='0%' y1='0%' x2='100%' y2='0%'>
+                <stop offset='0%' stop-color='#f59e0b'/><stop offset='55%' stop-color='#8b5cf6'/><stop offset='100%' stop-color='#059669'/></linearGradient></defs>
+                <path d='M 78 174 A 122 122 0 0 1 322 174' stroke='#e2e8f0' stroke-width='24' stroke-linecap='round' fill='none'/>
+                <path d='M 78 174 A 122 122 0 0 1 322 174' stroke='url(#pqmArc)' stroke-width='24' stroke-linecap='round' fill='none'
+                stroke-dasharray='{arc_length*progress/100:.3f} {arc_length:.3f}'/>
+                <text x='200' y='151' text-anchor='middle' font-size='42' font-weight='800' fill='#172b4d'>{pct:.2f}%</text>
+                <text x='200' y='177' text-anchor='middle' font-size='14' fill='#64748b'>PQM GRT</text>
+                <text x='70' y='209' font-size='14' fill='#64748b'>0%</text><text x='291' y='209' font-size='14' fill='#64748b'>100%</text>
+                </svg></div>"""
+                st.markdown(svg,unsafe_allow_html=True)
                 if pct>100:st.caption('Actual value exceeds the 100% gauge maximum.')
         with right:
             st.markdown('**Disbursement Performance · Progress Comparison**')
