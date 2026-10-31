@@ -49,7 +49,7 @@ def load_report(raw):
             cells, missing = {}, 0
             width = max((colnum(c.attrib['r']) for c in root.findall('s:sheetData/s:row/s:c', NS) if int(re.search(r'\d+', c.attrib['r'])[0]) <= 3), default=0)
             # Ignore unrelated trailing helper columns and notes.
-            width = min(width, {'Zone':39,'Region(AVP)':40,'DM':38,'PQM':42}[level])
+            width = min(width, 250)  # dynamic header width, including newly inserted columns
             if width < 10 or width > 300: raise ValueError(f'Unexpected number of columns in {name}: {width}')
             for cell in root.findall('s:sheetData/s:row/s:c', NS):
                 r, c = coord(cell.attrib['r'])
@@ -126,40 +126,84 @@ def display(value, header):
 
 
 def render_table(info, rows, total=None):
-    frozen = {'Zone Summary': [1], 'Region(AVP) Summary': [1, 2],
-              'DM Summary': [1, 2], 'PQM Summary': [8]}[info['name']]
-    def pin(column):
-        if column not in frozen:
-            return ''
-        left = frozen.index(column) * 160
-        return f' class="frozen" style="left:{left}px;min-width:160px;width:160px;max-width:160px;box-sizing:border-box"'
-    covered, origins = set(), {}
-    for r1, c1, r2, c2 in info['merges']:
-        origins[r1, c1] = (r2-r1+1, c2-c1+1)
-        covered.update((r, c) for r in range(r1, r2+1) for c in range(c1, c2+1)
-                       if (r, c) != (r1, c1))
-    out = ['<div class="report-scroll"><table class="report"><thead>']
-    for r in range(1, 4):
+    """Excel-style three-tier headers and conditional performance heatmap."""
+    from math import isfinite
+    width = info['width']
+    headers = info['headers']
+    ids = info['ids']
+    def norm(x): return re.sub(r'[^a-z0-9]+', '', str(x).lower())
+    grt_cols = [i for i,h in enumerate(headers) if 'freshclientgrt' in norm(h) and 'grt' in norm(h) and ('grt%' in h.lower() or 'grt(%)' in h.lower())]
+    ftnr_cols = [i for i,h in enumerate(headers) if 'ftnr' in norm(h) and 'ftnr%' in h.lower()]
+    amount_cols = [i for i,h in enumerate(headers) if i>=ids and ('db amount' in h.lower() or 'dbamount' in norm(h))]
+    def numeric(x):
+        try:
+            if x is None or str(x).strip() in ('','-','—'): return None
+            v=float(x)
+            return v if isfinite(v) else None
+        except (TypeError,ValueError):return None
+    extrema={}
+    for col in grt_cols+ftnr_cols+amount_cols:
+        nums=[numeric(r[col]) for r in rows]
+        nums=[x for x in nums if x is not None]
+        if nums: extrema[col]=(min(nums),max(nums))
+    def heat(value,col):
+        v=numeric(value)
+        if v is None or col not in extrema:return ''
+        low,high=extrema[col]
+        t=(v-low)/(high-low) if high>low else 1.0
+        if col in ftnr_cols:t=1-t
+        # Red -> amber -> light green -> deep green; text remains readable.
+        if t>=.80: return 'background:#15803d;color:#fff;font-weight:800;'
+        if t>=.60: return 'background:#bbf7d0;color:#14532d;font-weight:700;'
+        if t>=.40: return 'background:#fef08a;color:#713f12;font-weight:700;'
+        if t>=.20: return 'background:#fed7aa;color:#9a3412;font-weight:700;'
+        return 'background:#fecaca;color:#991b1b;font-weight:700;'
+    def group_color(c):
+        h=str(headers[c-1]).lower()
+        if c<=ids:return '#243b60'
+        if 'vishwas' in h or 'allocated' in h or 'pd conducted' in h:return '#0369a1'
+        if 'fresh client grt' in h:return '#6d28d9'
+        if 'ujala' in h:return '#c2410c'
+        if 'ftnr' in h:return '#047857'
+        if 'time in minutes' in h or 'productivity' in h:return '#be185d'
+        return '#334155'
+    frozen = [1] if ids<2 else [1,2]
+    if info['name']=='PQM Summary':frozen=[6,8]  # PQM Name + Branch
+    def pin(c):
+        if c not in frozen:return ''
+        left=frozen.index(c)*165
+        return f'position:sticky;left:{left}px;min-width:165px;max-width:165px;z-index:3;'
+    covered=set();origins={}
+    for r1,c1,r2,c2 in info['merges']:
+        if c1>width:continue
+        r2=min(r2,3);c2=min(c2,width)
+        origins[r1,c1]=(r2-r1+1,c2-c1+1)
+        covered.update((r,c) for r in range(r1,r2+1) for c in range(c1,c2+1) if (r,c)!=(r1,c1))
+    out=['<div class="report-scroll"><table class="report"><thead>']
+    for r in range(1,4):
         out.append('<tr>')
-        for c in range(1, info['width']+1):
-            if (r, c) in covered:
-                continue
-            rs, cs = origins.get((r, c), (1, 1))
-            text = escape(str(info['cells'].get((r, c), ''))).replace('\n', '<br>')
-            out.append(f'<th{pin(c)} rowspan="{rs}" colspan="{cs}">{text}</th>')
+        for c in range(1,width+1):
+            if (r,c) in covered:continue
+            rs,cs=origins.get((r,c),(1,1))
+            value=escape(str(info['cells'].get((r,c),'') or '')).replace('\n','<br>')
+            style=f'background:{group_color(c)};{pin(c)}'
+            out.append(f'<th rowspan="{rs}" colspan="{cs}" style="{style}">{value}</th>')
         out.append('</tr>')
     out.append('</thead><tbody>')
-    for values in rows:
+    for ri,values in enumerate(rows):
         out.append('<tr>')
-        for c, v in enumerate(values):
-            label = c < info['ids']
-            attrs = pin(c+1) if c+1 in frozen else f' class="{"label" if label else "number"}"'
-            out.append(f'<td{attrs}>{escape(str(v or "") if label else display(v,info["headers"][c]))}</td>')
+        for c,v in enumerate(values):
+            is_label=c<ids
+            content=escape(str(v) if v is not None else '') if is_label else escape(display(v,headers[c]))
+            bg='#fff' if ri%2==0 else '#f1f6fd'
+            style=(f'background:{bg};'+pin(c+1)) if c+1 in frozen else heat(v,c)
+            out.append(f'<td class="{"label" if is_label else "number"}" style="{style}">{content}</td>')
         out.append('</tr>')
-    if total:
+    if total is not None:
         out.append('<tr class="total">')
-        for c, v in enumerate(total):
-            out.append(f'<td{pin(c+1)}>{escape(str(v or "") if c < info["ids"] else display(v,info["headers"][c]))}</td>')
+        for c,v in enumerate(total):
+            content=escape(str(v) if v is not None else '') if c<ids else escape(display(v,headers[c]))
+            out.append(f'<td style="background:#172f53;color:white;font-weight:800;{pin(c+1)}">{content}</td>')
         out.append('</tr>')
     out.append('</tbody></table></div>')
     return ''.join(out)
@@ -184,13 +228,13 @@ def main():
     .report th{background:#133d65;color:white;min-width:95px;padding:11px 9px;border-right:1px solid #4b6984;border-bottom:1px solid #4b6984;text-align:center}
     .report thead{position:sticky;top:0;z-index:2}.report td{padding:9px 12px;border-right:1px solid #e0e6ef;border-bottom:1px solid #e0e6ef;white-space:nowrap;text-align:right}
     .report td.label{text-align:left}.report tbody tr:nth-child(even){background:#f0f5fa}
-    .report tbody tr:hover{background:#e2f1fa}
+    .report tbody tr:hover{outline:2px solid #60a5fa;outline-offset:-2px}
     .report .frozen{position:sticky;left:0;text-align:left;white-space:normal;overflow-wrap:anywhere;box-shadow:2px 0 3px #c4d3e3}
     .report td.frozen{z-index:1;background:#fff}
     .report tbody tr:nth-child(even) td.frozen{background:#f0f5fa}
     .report tbody tr:hover td.frozen{background:#e2f1fa}
     .report th.frozen{z-index:4;background:#133d65}
-    .report tr.total td.frozen{background:#d9e8f5}.report tr.total{background:#d9e8f5;font-weight:bold}
+    .report tr.total{background:#172f53;color:white;font-weight:bold}
     </style>''', unsafe_allow_html=True)
     st.markdown('<div class="hero"><h1>Welcome to the PQM Dashboard Analyser</h1><p>Explore your performance in visual and detailed table views. Upload your latest report.</p></div>', unsafe_allow_html=True)
 
@@ -289,7 +333,7 @@ def main():
         ('Ujala', 'CB to DB', 'count', 'Ujala / CB to DB'),
         ('Ujala', 'DB Amount', 'rupees', 'Ujala / DB Amount'),
         ('FTNR', 'FTNR %', 'ftnr_rate', 'FTNR %'),
-        ('Productivity', 'Effective Productivity', 'weighted_rate', 'Time in Minutes / Eff Productivity'),
+        ('Productivity', 'Effective Productivity', 'weighted_rate', 'Time in Minutes / Effective Productivity'),
     ]
     def locate(key):
         if key == 'Vishwas Pipeline / # DB':
@@ -298,7 +342,7 @@ def main():
         if key == 'Vishwas Pipeline / Declined':
             hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('vishwaspipeline') and normalize(h).endswith('declined')]
             return hits[0] if len(hits)==1 else None
-        if key == 'Time in Minutes / Eff Productivity':
+        if key == 'Time in Minutes / Effective Productivity':
             hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('timeinminutes') and (normalize(h).endswith('effproductivity') or normalize(h).endswith('effectiveproductivity'))]
             return hits[0] if len(hits)==1 else None
         if key == 'FTNR %':
@@ -366,21 +410,33 @@ def main():
         .visual-foot{font-size:11px;color:#94a3b8;margin-top:8px}
         @media(max-width:1000px){.visual-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
         @media(max-width:530px){.visual-grid{grid-template-columns:1fr}}
+        .paired-sections{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px;margin-bottom:18px;align-items:start}
+        .paired-sections:has(> .paired-section:only-child){grid-template-columns:1fr}
+        .paired-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+        .paired-section .visual-heading{margin:12px 0 10px}
+        .paired-section .visual-card{padding:14px 15px;min-height:145px}
+        .paired-section .visual-icon{width:32px;height:32px;font-size:18px;margin-bottom:8px}
+        .paired-section .visual-value{font-size:clamp(18px,2vw,27px)}
+        @media(max-width:900px){.paired-sections{grid-template-columns:1fr}}
+        @media(max-width:480px){.paired-cards{grid-template-columns:1fr 1fr;gap:8px}.paired-section .visual-card{padding:10px}}
         </style>""",unsafe_allow_html=True)
         st.markdown('### Performance overview')
         st.caption('Live view of the selected Excel summary · Filters apply to cards and charts')
         icons={'Vishwas':'💼','GRT':'🎯','Ujala':'✨','FTNR':'🛡️','Productivity':'⏱️'}
         soft={'Vishwas':'#e0f2fe','GRT':'#ede9fe','Ujala':'#ffedd5','FTNR':'#d1fae5','Productivity':'#fce7f3'}
         grouped={g:[sp for sp in SPECS if sp[0]==g] for g in palette}
-        for group,specs in grouped.items():
-            st.markdown(f'<div class="visual-heading"><span style="color:{palette[group]}">{icons[group]}</span> {group} Performance</div>',unsafe_allow_html=True)
-            cards=['<div class="visual-grid">']
-            for spec in specs:
-                _,label,kind,key=spec
-                val=fmt(metric(spec),kind)
-                cards.append(f'<div class="visual-card" style="--accent:{palette[group]};--soft:{soft[group]}"><div class="visual-icon">{icons[group]}</div><div class="visual-label">{escape(label)}</div><div class="visual-value">{escape(val)}</div><div class="visual-foot">{escape(group)} · Current selection</div></div>')
-            cards.append('</div>')
-            st.markdown(''.join(cards),unsafe_allow_html=True)
+        # Compact paired KPI sections: two categories per row.
+        for pair in [('Vishwas',), ('GRT', 'FTNR'), ('Ujala', 'Productivity')]:
+            sections = ['<div class="paired-sections">']
+            for group in pair:
+                sections.append(f'<section class="paired-section"><div class="visual-heading"><span style="color:{palette[group]}">{icons[group]}</span> {escape(group)} Performance</div><div class="paired-cards">')
+                for spec in grouped[group]:
+                    _,label,kind,key=spec
+                    val=fmt(metric(spec),kind)
+                    sections.append(f'<div class="visual-card" style="--accent:{palette[group]};--soft:{soft[group]}"><div class="visual-icon">{icons[group]}</div><div class="visual-label">{escape(label)}</div><div class="visual-value">{escape(val)}</div></div>')
+                sections.append('</div></section>')
+            sections.append('</div>')
+            st.markdown(''.join(sections),unsafe_allow_html=True)
         st.markdown('### Performance analytics')
         def plot_data(key,rate=False,ascending=False,limit=10):
             idx=locate(key)
@@ -433,6 +489,7 @@ def main():
                 st.plotly_chart(fig,use_container_width=True)
             else:st.info('Conversion chart is unavailable.')
     else:
+        st.caption('🟢 Green = stronger performance · 🟡 Yellow = middle · 🔴 Red = needs attention. GRT: higher is better; FTNR: lower is better. Colours are relative to filtered rows.')
         cards=['<div class="kpi-grid">']
         for group,label,kind,key in SPECS:
             cards.append(f'<div class="kpi-tile"><div class="kpi-group-label">{escape(group)}</div><div class="kpi-label">{escape(label)}</div><div class="kpi-number">{escape(fmt(metric((group,label,kind,key)),kind))}</div></div>')
