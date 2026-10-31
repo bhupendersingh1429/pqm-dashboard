@@ -47,7 +47,9 @@ def load_report(raw):
                 raise ValueError(f'Missing sheet: {name}. Upload the Combined PQM Report .xlsx.')
             root = ET.fromstring(z.read(sheets[name]))
             cells, missing = {}, 0
-            width = max((colnum(c.attrib['r']) for c in root.findall('s:sheetData/s:row/s:c', NS)), default=0)
+            width = max((colnum(c.attrib['r']) for c in root.findall('s:sheetData/s:row/s:c', NS) if int(re.search(r'\d+', c.attrib['r'])[0]) <= 3), default=0)
+            # Ignore unrelated trailing helper columns and notes.
+            width = min(width, {'Zone':39,'Region(AVP)':40,'DM':38,'PQM':42}[level])
             if width < 10 or width > 300: raise ValueError(f'Unexpected number of columns in {name}: {width}')
             for cell in root.findall('s:sheetData/s:row/s:c', NS):
                 r, c = coord(cell.attrib['r'])
@@ -116,7 +118,7 @@ def display(value, header):
     if value is None: return '—'
     if not isinstance(value, Real): return str(value)
     h = str(header).lower()
-    if 'ftnr %' in h or 'grt(%)' in h or 'eff productivity' in h or 'effective productivity' in h:
+    if 'ftnr %' in h or 'grt(%)' in h:
         return f'{value:.2%}'
     if 'productivity' in h or 'time in minutes' in h or 'amount(cr)' in h:
         return f'{value:,.2f}'
@@ -300,7 +302,7 @@ def main():
             hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('timeinminutes') and (normalize(h).endswith('effproductivity') or normalize(h).endswith('effectiveproductivity'))]
             return hits[0] if len(hits)==1 else None
         if key == 'FTNR %':
-            hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('ftnr') and normalize(h).endswith('ftnr')]
+            hits=[i for i,h in enumerate(info['headers']) if normalize(h).startswith('ftnr') and normalize(h).endswith('ftnr') and 'totalgrt' not in normalize(h)]
             return hits[0] if len(hits)==1 else None
         return find_metric(key)
     def aggregate(idx):
@@ -338,7 +340,8 @@ def main():
         return aggregate(idx)
     def fmt(v,kind):
         if v is None or pd.isna(v):return '—'
-        if kind in ('grt_rate','ftnr_rate','weighted_rate'):return f'{v:.2%}'
+        if kind in ('grt_rate','ftnr_rate'):return f'{v:.2%}'
+        if kind=='weighted_rate':return f'{v:,.2f}'
         if kind=='crore':return f'₹{v:,.2f} Cr'
         if kind=='rupees':return f'₹{v/1e7:,.2f} Cr'
         return f'{v:,.0f}'
@@ -349,27 +352,86 @@ def main():
     [data-testid="stMetricLabel"]{color:#475569}</style>""",unsafe_allow_html=True)
     if view=='📊 Visual Dashboard':
         import plotly.express as px
-        for group in palette:
-            st.markdown(f'<h3 style="color:{palette[group]}">{group}</h3>',unsafe_allow_html=True)
-            group_specs=[x for x in SPECS if x[0]==group]
-            cols=st.columns(len(group_specs))
-            for col,spec in zip(cols,group_specs):col.metric(spec[1],fmt(metric(spec),spec[2]))
-        if not filtered.empty:
-            st.subheader('Performance comparison')
-            chart_choices=[('DB','Vishwas Pipeline / # DB'),('PQM GRT','Fresh Client GRT / PQM GRT'),('FTNR %','FTNR %')]
-            choice=st.selectbox('Compare by',[x[0] for x in chart_choices])
-            idx=locate(dict(chart_choices)[choice])
-            if idx is not None:
-                entity_col=next((i for i,h in enumerate(info['headers']) if normalize(h) in ('dmname','pqmname','zonalname','regionavpname','branch')),0)
-                plot=pd.DataFrame({'Entity':filtered.iloc[:,entity_col].fillna('Unknown').astype(str).to_numpy(),'Value':pd.to_numeric(filtered.iloc[:,idx],errors='coerce').to_numpy()})
-                plot=plot.dropna(subset=['Value'])
-                if choice=='FTNR %':plot['Value']*=100
-                if not plot.empty:
-                    top=plot.sort_values('Value',ascending=(choice=='FTNR %')).head(10)
-                    fig=px.bar(top,x='Value',y='Entity',orientation='h',color='Value',color_continuous_scale='Blues')
-                    fig.update_layout(height=430,yaxis={'categoryorder':'total ascending'},margin=dict(l=10,r=10,t=20,b=20))
-                    st.plotly_chart(fig,use_container_width=True)
-            else:st.info('Chart metric is not available in this sheet.')
+        import plotly.graph_objects as go
+        st.markdown("""<style>
+        .block-container{max-width:1550px;padding-top:1.4rem}
+        .visual-heading{font-size:19px;font-weight:800;color:#172b4d;margin:24px 0 12px}
+        .visual-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:12px 0 20px}
+        .visual-card{background:white;border:1px solid #e5eaf4;border-radius:18px;padding:19px 18px 17px;
+          box-shadow:0 7px 22px rgba(34,56,96,.065);border-top:5px solid var(--accent);min-width:0}
+        .visual-icon{font-size:22px;background:var(--soft);border-radius:11px;width:42px;height:42px;
+          display:flex;align-items:center;justify-content:center;margin-bottom:13px}
+        .visual-label{font-size:13px;font-weight:600;color:#64748b;min-height:19px}
+        .visual-value{font-size:clamp(20px,2.3vw,32px);font-weight:800;color:#15243d;letter-spacing:-.8px;margin-top:7px;overflow-wrap:anywhere}
+        .visual-foot{font-size:11px;color:#94a3b8;margin-top:8px}
+        @media(max-width:1000px){.visual-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+        @media(max-width:530px){.visual-grid{grid-template-columns:1fr}}
+        </style>""",unsafe_allow_html=True)
+        st.markdown('### Performance overview')
+        st.caption('Live view of the selected Excel summary · Filters apply to cards and charts')
+        icons={'Vishwas':'💼','GRT':'🎯','Ujala':'✨','FTNR':'🛡️','Productivity':'⏱️'}
+        soft={'Vishwas':'#e0f2fe','GRT':'#ede9fe','Ujala':'#ffedd5','FTNR':'#d1fae5','Productivity':'#fce7f3'}
+        grouped={g:[sp for sp in SPECS if sp[0]==g] for g in palette}
+        for group,specs in grouped.items():
+            st.markdown(f'<div class="visual-heading"><span style="color:{palette[group]}">{icons[group]}</span> {group} Performance</div>',unsafe_allow_html=True)
+            cards=['<div class="visual-grid">']
+            for spec in specs:
+                _,label,kind,key=spec
+                val=fmt(metric(spec),kind)
+                cards.append(f'<div class="visual-card" style="--accent:{palette[group]};--soft:{soft[group]}"><div class="visual-icon">{icons[group]}</div><div class="visual-label">{escape(label)}</div><div class="visual-value">{escape(val)}</div><div class="visual-foot">{escape(group)} · Current selection</div></div>')
+            cards.append('</div>')
+            st.markdown(''.join(cards),unsafe_allow_html=True)
+        st.markdown('### Performance analytics')
+        def plot_data(key,rate=False,ascending=False,limit=10):
+            idx=locate(key)
+            if idx is None or filtered.empty:return None
+            entity_col=next((i for i,h in enumerate(info['headers'][:info['ids']]) if normalize(h) in ('dmname','pqmname','zonalname','regionavpname','branch')),0)
+            frame=pd.DataFrame({'Name':filtered.iloc[:,entity_col].fillna('Unknown').astype(str).to_numpy(),
+                'Value':pd.to_numeric(filtered.iloc[:,idx],errors='coerce').to_numpy()})
+            frame=frame.dropna(subset=['Value'])
+            frame=frame[frame['Name'].str.strip().ne('')]
+            if rate:frame['Value']=frame['Value']*100
+            if frame.empty:return None
+            return frame.sort_values('Value',ascending=ascending).head(limit)
+        left,right=st.columns(2,gap='large')
+        with left:
+            st.markdown('**Top 10 · Disbursement**')
+            data=plot_data('Vishwas Pipeline / # DB')
+            if data is not None:
+                fig=px.bar(data,x='Value',y='Name',orientation='h',color='Value',color_continuous_scale=['#bae6fd','#0284c7','#075985'],text='Value')
+                fig.update_layout(height=390,coloraxis_showscale=False,yaxis={'categoryorder':'total ascending'},margin=dict(l=0,r=12,t=8,b=10),paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)')
+                fig.update_traces(textposition='outside')
+                st.plotly_chart(fig,use_container_width=True)
+            else:st.info('Disbursement chart not available.')
+        with right:
+            st.markdown('**Top 10 · PQM GRT**')
+            data=plot_data('Fresh Client GRT / PQM GRT')
+            if data is not None:
+                fig=px.bar(data,x='Value',y='Name',orientation='h',color='Value',color_continuous_scale=['#ddd6fe','#8b5cf6','#5b21b6'],text='Value')
+                fig.update_layout(height=390,coloraxis_showscale=False,yaxis={'categoryorder':'total ascending'},margin=dict(l=0,r=12,t=8,b=10),paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)')
+                fig.update_traces(textposition='outside')
+                st.plotly_chart(fig,use_container_width=True)
+            else:st.info('GRT chart not available.')
+        left,right=st.columns(2,gap='large')
+        with left:
+            st.markdown('**GRT mix · PQM vs Branch**')
+            pqm=aggregate(locate('Fresh Client GRT / PQM GRT'))
+            branch=aggregate(locate('Fresh Client GRT / Branch GRT'))
+            if pqm is not None and branch is not None and pqm+branch>0:
+                fig=go.Figure(go.Pie(labels=['PQM GRT','Branch GRT'],values=[pqm,branch],hole=.67,marker_colors=['#7c3aed','#38bdf8'],textinfo='percent+label'))
+                fig.update_layout(height=340,margin=dict(l=10,r=10,t=10,b=10),showlegend=False,paper_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig,use_container_width=True)
+            else:st.info('GRT mix is unavailable.')
+        with right:
+            st.markdown('**Disbursement conversion**')
+            allocated=aggregate(locate('#Total Allocated'))
+            conducted=aggregate(locate('# Total PD Conducted'))
+            disbursed=aggregate(locate('Vishwas Pipeline / # DB'))
+            if all(v is not None for v in [allocated,conducted,disbursed]):
+                fig=go.Figure(go.Bar(x=['Allocated','PD Conducted','DB'],y=[allocated,conducted,disbursed],marker_color=['#38bdf8','#8b5cf6','#10b981'],text=[f'{v:,.0f}' for v in [allocated,conducted,disbursed]],textposition='outside'))
+                fig.update_layout(height=340,margin=dict(l=10,r=10,t=10,b=10),yaxis_title='Cases',paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig,use_container_width=True)
+            else:st.info('Conversion chart is unavailable.')
     else:
         cards=['<div class="kpi-grid">']
         for group,label,kind,key in SPECS:
