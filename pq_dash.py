@@ -468,6 +468,13 @@ def main():
         @media(max-width:530px){.visual-grid{grid-template-columns:1fr}}
         .paired-sections{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px;margin-bottom:18px;align-items:start}
         .paired-sections:has(> .paired-section:only-child){grid-template-columns:1fr}
+        .vishwas-row{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:8px 0 20px}
+        .vishwas-row .visual-card{padding:13px 12px;min-height:130px}
+        .vishwas-row .visual-icon{width:30px;height:30px;font-size:16px;margin-bottom:7px}
+        .vishwas-row .visual-label{font-size:12px}
+        .vishwas-row .visual-value{font-size:clamp(17px,1.7vw,25px)}
+        @media(max-width:1050px){.vishwas-row{grid-template-columns:repeat(3,minmax(0,1fr))}}
+        @media(max-width:600px){.vishwas-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
         .paired-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
         .paired-section .visual-heading{margin:12px 0 10px}
         .paired-section .visual-card{padding:14px 15px;min-height:145px}
@@ -481,8 +488,16 @@ def main():
         icons={'Vishwas':'💼','GRT':'🎯','Ujala':'✨','FTNR':'🛡️','Productivity':'⏱️'}
         soft={'Vishwas':'#e0f2fe','GRT':'#ede9fe','Ujala':'#ffedd5','FTNR':'#d1fae5','Productivity':'#fce7f3'}
         grouped={g:[sp for sp in SPECS if sp[0]==g] for g in palette}
-        # Compact paired KPI sections: two categories per row.
-        for pair in [('Vishwas',), ('GRT', 'FTNR'), ('Ujala', 'Productivity')]:
+        # Vishwas: all five KPIs in a single desktop row, wrapping on smaller screens.
+        st.markdown('<div class="visual-heading">💼 Vishwas Performance</div>',unsafe_allow_html=True)
+        vishwas_cards=['<div class="vishwas-row">']
+        for group,label,kind,key in grouped['Vishwas']:
+            val=fmt(metric((group,label,kind,key)),kind)
+            vishwas_cards.append(f'<div class="visual-card" style="--accent:{palette[group]};--soft:{soft[group]}"><div class="visual-icon">💼</div><div class="visual-label">{escape(label)}</div><div class="visual-value">{escape(val)}</div></div>')
+        vishwas_cards.append('</div>')
+        st.markdown(''.join(vishwas_cards),unsafe_allow_html=True)
+        # Remaining categories paired in compact sections.
+        for pair in [('GRT', 'FTNR'), ('Ujala', 'Productivity')]:
             sections = ['<div class="paired-sections">']
             for group in pair:
                 sections.append(f'<section class="paired-section"><div class="visual-heading"><span style="color:{palette[group]}">{icons[group]}</span> {escape(group)} Performance</div><div class="paired-cards">')
@@ -512,6 +527,9 @@ def main():
                     branch_idx=next((i for i,h in enumerate(source_info['headers']) if norm(h)=='branch'),None)
                     if branch_idx is not None:source=source[source.iloc[:,branch_idx].astype(str).isin(selected_branches)]
             metric_hits=[i for i,h in enumerate(source_info['headers']) if norm(h).endswith(norm(key))]
+            if len(metric_hits)!=1 and key=='Ujala / CB to DB':
+                metric_hits=[i for i,h in enumerate(source_info['headers'])
+                             if 'ujala' in norm(h) and norm(h).endswith('cbtodb')]
             if len(metric_hits)!=1:
                 if key=='Vishwas Pipeline / # DB':
                     metric_hits=[i for i,h in enumerate(source_info['headers']) if norm(h).startswith('vishwaspipeline') and norm(h).endswith('db')]
@@ -553,7 +571,7 @@ def main():
                                   font=dict(size=12,color='#334155'),showlegend=False)
                 st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
         left,right=st.columns(2,gap='large')
-        ranked_chart(left,'Vishwas Pipeline / # DB','Top 10 · Disbursement Count',['#bae6fd','#0284c7','#075985'])
+        ranked_chart(left,'Ujala / CB to DB','Top 10 · Ujala CB to DB',['#ffedd5','#fb923c','#c2410c'])
         ranked_chart(right,'Fresh Client GRT / PQM GRT','Top 10 · PQM GRT',['#ddd6fe','#8b5cf6','#5b21b6'])
         left,right=st.columns(2,gap='large')
         with left:
